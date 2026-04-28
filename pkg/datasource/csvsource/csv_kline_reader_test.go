@@ -6,7 +6,6 @@ import (
 	"encoding/csv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/stretchr/testify/assert"
@@ -87,8 +86,8 @@ func TestCSVKLineReader_ReadWithBinanceDecoder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			csv := csv.NewReader(strings.NewReader(tt.give))
-			reader := NewCSVKLineReader(csv)
-			kline, err := reader.Read(time.Hour)
+			reader := NewCSVKLineReader(csv, "", types.Interval1m)
+			kline, err := reader.Read()
 			assert.Equal(t, tt.err, err)
 			if err == nil {
 				spew.Dump(tt.want)
@@ -101,11 +100,12 @@ func TestCSVKLineReader_ReadWithBinanceDecoder(t *testing.T) {
 
 func TestCSVKLineReader_ReadAll(t *testing.T) {
 	records := []string{
+		"open_time,open,high,low,close,volume",
 		"1609459200000,28923.63000000,29031.34000000,28690.17000000,28995.13000000,2311.81144500",
 		"1609459300000,28928.63000000,30031.34000000,22690.17000000,28495.13000000,3000.00",
 	}
-	reader := NewCSVKLineReader(csv.NewReader(strings.NewReader(strings.Join(records, "\n"))))
-	klines, err := reader.ReadAll(time.Hour)
+	reader := NewCSVKLineReader(csv.NewReader(strings.NewReader(strings.Join(records, "\n"))), "", types.Interval1m)
+	klines, err := reader.ReadAll()
 	assert.NoError(t, err)
 	assert.Len(t, klines, 2)
 }

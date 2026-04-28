@@ -79,6 +79,7 @@ func NewVolumeProfile(source KLineSubscription, window int) *VolumeProfileStream
 			s.PushAndEmit(0)
 			return
 		}
+
 		var nBins = 10
 		// nBins = int(math.Floor((prices.Slice.Max()-prices.Slice.Min())/binWidth)) + 1
 		s.VP.High = prices.Slice.Max()

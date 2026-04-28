@@ -1,7 +1,6 @@
 package csvsource
 
 import (
-	"fmt"
 	"strconv"
 	"time"
 
@@ -10,7 +9,7 @@ import (
 )
 
 // parseCsvKLineRecord parse a CSV record into a KLine.
-func parseCsvKLineRecord(record []string, symbol string, interval time.Duration) (types.KLine, error) {
+func parseCsvKLineRecord(record []string, symbol string, interval types.Interval) (types.KLine, error) {
 	var (
 		k, empty types.KLine
 		err      error
@@ -21,27 +20,27 @@ func parseCsvKLineRecord(record []string, symbol string, interval time.Duration)
 
 	ts, err := strconv.ParseFloat(record[0], 64) // check for e numbers "1.70027E+12"
 	if err != nil {
-		return empty, fmt.Errorf("unable to parse timestamp: %w", err)
+		return empty, ErrInvalidTimeFormat
 	}
 
 	open, err := fixedpoint.NewFromString(record[1])
 	if err != nil {
-		return empty, fmt.Errorf("unable to parse open price: %w", err)
+		return empty, ErrInvalidPriceFormat
 	}
 
 	high, err := fixedpoint.NewFromString(record[2])
 	if err != nil {
-		return empty, fmt.Errorf("unable to parse high price: %w", err)
+		return empty, ErrInvalidPriceFormat
 	}
 
 	low, err := fixedpoint.NewFromString(record[3])
 	if err != nil {
-		return empty, fmt.Errorf("unable to parse low price: %w", err)
+		return empty, ErrInvalidPriceFormat
 	}
 
 	closePrice, err := fixedpoint.NewFromString(record[4])
 	if err != nil {
-		return empty, fmt.Errorf("unable to parse close price: %w", err)
+		return empty, ErrInvalidPriceFormat
 	}
 
 	volume := fixedpoint.Zero
@@ -57,10 +56,11 @@ func parseCsvKLineRecord(record []string, symbol string, interval time.Duration)
 
 	k.Symbol = symbol
 	k.StartTime = types.Time(time.UnixMilli(tsMs))
-	k.EndTime = types.Time(k.StartTime.Time().Add(interval - time.Millisecond))
+	k.EndTime = types.Time(k.StartTime.Time().Add(interval.Duration() - time.Millisecond))
 	k.Open = open
 	k.High = high
 	k.Low = low
+	k.Interval = interval
 	k.Close = closePrice
 	k.Volume = volume
 	k.Closed = true
