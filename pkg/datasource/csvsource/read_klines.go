@@ -19,7 +19,7 @@ type KLineReader interface {
 // ReadAllCsv reads all the .csv files in a given directory or a single file into a slice of KLines.
 // Wraps a default CSVKLineReader with Binance decoder for convenience.
 // For finer grained memory management use the base kline reader.
-func ReadAllCsv(dir string, interval time.Duration) ([]types.KLine, error) {
+func ReadAllCsv(dir string, symbol string, interval time.Duration) ([]types.KLine, error) {
 	var klines []types.KLine
 
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -32,12 +32,15 @@ func ReadAllCsv(dir string, interval time.Duration) ([]types.KLine, error) {
 		if filepath.Ext(path) != ".csv" {
 			return nil
 		}
+
 		file, err := os.Open(path)
 		if err != nil {
 			return err
 		}
+
 		//nolint:errcheck // Read ops only so safe to ignore err return
 		defer file.Close()
+
 		reader := NewCSVKLineReader(csv.NewReader(file))
 		newKlines, err := reader.ReadAll(interval)
 		if err != nil {

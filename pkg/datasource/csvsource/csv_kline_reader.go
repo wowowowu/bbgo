@@ -31,12 +31,16 @@ func (r *CSVKLineReader) Read(interval time.Duration) (types.KLine, error) {
 		return k, err
 	}
 
-	return parseCsvKLineRecord(rec, interval)
+	return parseCsvKLineRecord(rec, "", interval)
 }
 
 // ReadAll reads all the KLines from the underlying CSV data.
 func (r *CSVKLineReader) ReadAll(interval time.Duration) ([]types.KLine, error) {
 	var ks []types.KLine
+
+	// skip column names row
+	_, _ = r.Read(interval)
+
 	for {
 		k, err := r.Read(interval)
 		if err == io.EOF {
