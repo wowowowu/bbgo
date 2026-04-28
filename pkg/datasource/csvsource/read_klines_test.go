@@ -8,7 +8,7 @@ import (
 )
 
 func TestReadKLinesFromCSV(t *testing.T) {
-	klines, err := ReadAllCsv("./testdata/binance/BTCUSDT-1h-2023-11-18.csv", "", time.Hour)
+	klines, err := ReadAllKLineCsv("./testdata/binance/BTCUSDT-1h-2023-11-18.csv", "", time.Hour)
 	assert.NoError(t, err)
 	assert.Len(t, klines, 24)
 	assert.Equal(t, int64(1700270000), klines[0].StartTime.Unix(), "StartTime")
