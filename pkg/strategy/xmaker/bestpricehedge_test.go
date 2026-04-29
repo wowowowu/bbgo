@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/c9s/bbgo/pkg/bbgo"
 	. "github.com/c9s/bbgo/pkg/testing/testhelper"
 	"github.com/c9s/bbgo/pkg/tradeid"
 	"github.com/c9s/bbgo/pkg/types"
@@ -58,7 +59,7 @@ func TestSplitHedge_HedgeWithBestPriceAlgo(t *testing.T) {
 	})
 
 	strategy := &Strategy{}
-	strategy.positionExposure = NewPositionExposure(market.Symbol)
+	strategy.positionExposure = bbgo.NewPositionExposure(market.Symbol)
 	strategy.makerMarket = market
 	strategy.logger = logrus.New()
 
@@ -85,7 +86,7 @@ func TestSplitHedge_HedgeWithBestPriceAlgo(t *testing.T) {
 	assert.True(t, handled)
 
 	// Strategy pending exposure should be covered by +2
-	assert.Equal(t, Number(2.0), strategy.positionExposure.pending.Get())
+	assert.Equal(t, Number(2.0), strategy.positionExposure.GetPending())
 
 	// hm1 should have received the cover delta because it has the best bid (10005 > 10000)
 	select {
@@ -103,7 +104,7 @@ func TestSplitHedge_HedgeWithBestPriceAlgo(t *testing.T) {
 	}
 
 	// Test fallback: position value exceeds BelowAmount
-	strategy.positionExposure = NewPositionExposure(market.Symbol)
+	strategy.positionExposure = bbgo.NewPositionExposure(market.Symbol)
 	split.BestPriceHedge.BelowAmount = Number(100) // very low
 
 	handled, err = split.hedgeWithBestPriceAlgo(ctx, uncovered, hedgeDelta)

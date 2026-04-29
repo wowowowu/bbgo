@@ -190,7 +190,7 @@ type HedgeMarket struct {
 	// Defaults to FeeModeTaker.
 	priceFeeMode FeeMode
 
-	positionExposure *PositionExposure
+	positionExposure *bbgo.PositionExposure
 
 	positionDeltaC chan fixedpoint.Value // channel to receive position delta updates
 
@@ -265,7 +265,7 @@ func NewHedgeMarket(
 
 		connectivity: connectivity,
 
-		positionExposure: NewPositionExposure(symbol),
+		positionExposure: bbgo.NewPositionExposure(symbol),
 
 		// default to taker fee mode for backward compatibility
 		priceFeeMode: FeeModeTaker,

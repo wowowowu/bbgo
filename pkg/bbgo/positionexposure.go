@@ -1,4 +1,4 @@
-package xmaker
+package bbgo
 
 import (
 	"fmt"
@@ -64,12 +64,24 @@ type PositionExposure struct {
 func NewPositionExposure(symbol string) *PositionExposure {
 	return &PositionExposure{
 		symbol: symbol,
-		logger: log,
+		logger: logrus.WithField("symbol", symbol),
 	}
 }
 
 func (m *PositionExposure) SetLogger(logger logrus.FieldLogger) {
 	m.logger = logger
+}
+
+func (m *PositionExposure) GetSymbol() string {
+	return m.symbol
+}
+
+func (m *PositionExposure) GetNet() fixedpoint.Value {
+	return m.net.Get()
+}
+
+func (m *PositionExposure) GetPending() fixedpoint.Value {
+	return m.pending.Get()
 }
 
 func (m *PositionExposure) Open(delta fixedpoint.Value) {

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/c9s/bbgo/pkg/bbgo"
 	. "github.com/c9s/bbgo/pkg/testing/testhelper"
 	"github.com/c9s/bbgo/pkg/tradeid"
 	"github.com/c9s/bbgo/pkg/types"
@@ -61,7 +62,7 @@ func TestSplitHedge_HedgeWithProportionAlgo(t *testing.T) {
 
 	// create a minimal strategy with position exposure and maker market
 	strategy := &Strategy{}
-	strategy.positionExposure = NewPositionExposure(market.Symbol)
+	strategy.positionExposure = bbgo.NewPositionExposure(market.Symbol)
 	strategy.makerMarket = market
 	strategy.logger = logrus.New()
 
@@ -91,7 +92,7 @@ func TestSplitHedge_HedgeWithProportionAlgo(t *testing.T) {
 	assert.NoError(t, err)
 
 	// The strategy pending exposure should be covered by +2 (sum of dispatched deltas)
-	assert.Equal(t, Number(2.0), strategy.positionExposure.pending.Get())
+	assert.Equal(t, Number(2.0), strategy.positionExposure.GetPending())
 
 	// Expect two dispatched cover deltas: +1 to each hedge market (sell side -> cover +quantity)
 	expectCover := Number(1.0)
