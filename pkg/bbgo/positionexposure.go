@@ -8,7 +8,28 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/types"
 )
+
+type Delta fixedpoint.Value
+
+func (d Delta) Side() types.SideType {
+	side := types.SideTypeBuy
+
+	if fixedpoint.Value(d).IsZero() {
+		side = types.SideTypeNone
+	}
+
+	if fixedpoint.Value(d).Sign() < 0 {
+		side = types.SideTypeSell
+	}
+
+	return side
+}
+
+func (d Delta) Quantity() fixedpoint.Value {
+	return fixedpoint.Value(d).Abs()
+}
 
 var positionExposurePendingMetrics = promauto.NewGaugeVec(
 	prometheus.GaugeOpts{
