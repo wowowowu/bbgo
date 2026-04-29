@@ -18,15 +18,16 @@ import (
 	"github.com/c9s/bbgo/pkg/core"
 	"github.com/c9s/bbgo/pkg/exchange/retry"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2"
 	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/c9s/bbgo/pkg/util"
 	"github.com/c9s/bbgo/pkg/util/tradingutil"
 )
 
-const ID = "grid2"
+const ID = "xhedgegrid"
 
-const orderTag = "grid2"
+const orderTag = "xhedgegrid"
 
 var log = logrus.WithField("strategy", ID)
 
@@ -164,9 +165,12 @@ type Strategy struct {
 	// Debug enables the debug mode
 	Debug bool `json:"debug"`
 
-	GridProfitStats *GridProfitStats `persistence:"grid_profit_stats"`
-	Position        *types.Position  `persistence:"position"`
-	PersistenceTTL  types.Duration   `json:"persistenceTTL"`
+	HedgeInterval types.Interval `json:"hedgeInterval"`
+
+	GridProfitStats *grid2.GridProfitStats `persistence:"grid_profit_stats"`
+
+	Position       *types.Position `persistence:"position"`
+	PersistenceTTL types.Duration  `json:"persistenceTTL"`
 
 	// ExchangeSession is an injection field
 	ExchangeSession *bbgo.ExchangeSession
@@ -181,7 +185,7 @@ type Strategy struct {
 	logger *logrus.Entry
 
 	gridReadyCallbacks  []func()
-	gridProfitCallbacks []func(stats *GridProfitStats, profit *GridProfit)
+	gridProfitCallbacks []func(stats *grid2.GridProfitStats, profit *grid2.GridProfit)
 	gridClosedCallbacks []func()
 	gridErrorCallbacks  []func(err error)
 
@@ -198,6 +202,12 @@ type Strategy struct {
 	cancelWrite          context.CancelFunc
 
 	recoverC chan struct{}
+
+	hedgeService   HedgeService
+	hedgeSimulator *HedgeSimulator
+
+	// PositionExposure is used for managing position exposure and hedging
+	positionExposure *bbgo.PositionExposure
 
 	// this ensures that bbgo.Sync to lock the object
 	sync.Mutex
@@ -314,11 +324,11 @@ func (s *Strategy) checkSpread() error {
 	return nil
 }
 
-func (s *Strategy) calculateProfit(o types.Order, buyPrice, buyQuantity fixedpoint.Value) *GridProfit {
+func (s *Strategy) calculateProfit(o types.Order, buyPrice, buyQuantity fixedpoint.Value) *grid2.GridProfit {
 	if s.EarnBase {
 		// sell quantity - buy quantity
 		profitQuantity := o.Quantity.Sub(buyQuantity)
-		profit := &GridProfit{
+		profit := &grid2.GridProfit{
 			Currency: s.Market.BaseCurrency,
 			Profit:   profitQuantity,
 			Time:     o.UpdateTime.Time(),
@@ -330,7 +340,7 @@ func (s *Strategy) calculateProfit(o types.Order, buyPrice, buyQuantity fixedpoi
 	// earn quote
 	// (sell_price - buy_price) * quantity
 	profitQuantity := o.Price.Sub(buyPrice).Mul(o.Quantity)
-	profit := &GridProfit{
+	profit := &grid2.GridProfit{
 		Currency: s.Market.QuoteCurrency,
 		Profit:   profitQuantity,
 		Time:     o.UpdateTime.Time(),
@@ -428,7 +438,7 @@ func (s *Strategy) aggregateOrderQuoteAmountAndFee(o types.Order) (fixedpoint.Va
 }
 
 func (s *Strategy) processFilledOrder(o types.Order) {
-	var profit *GridProfit = nil
+	var profit *grid2.GridProfit = nil
 
 	// check order fee
 	newSide := types.SideTypeSell
@@ -1512,6 +1522,53 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 	// newPrometheusLabels requires session.Name to setup the exchange label
 	s.mergedPrometheusLabels = s.newPrometheusLabels()
 
+	s.positionExposure = bbgo.NewPositionExposure(s.Symbol)
+	s.positionExposure.SetLogger(s.logger)
+	s.positionExposure.SetMetricsLabels(ID, s.InstanceID(), s.session.ExchangeName.String(), s.Symbol)
+
+	s.hedgeSimulator = NewHedgeSimulator(s.Symbol, s.Market)
+	s.hedgeSimulator.SetFeeRate(fixedpoint.NewFromFloat(0.02 * 0.01)) // 0.02% fee rate
+	s.hedgeSimulator.SetSpread(fixedpoint.NewFromFloat(0.01 * 0.01))  // 0.01% spread
+	s.hedgeService = s.hedgeSimulator
+
+	if s.HedgeInterval.Duration() > 0 {
+		if err := s.hedgeSimulator.LoadKLines("data/binance/futures"); err != nil {
+			s.logger.WithError(err).Error("failed to load klines for hedge simulator")
+			return err
+		}
+
+		session.UserDataStream.OnTradeUpdate(func(trade types.Trade) {
+			s.positionExposure.Open(trade.PositionDelta())
+		})
+
+		s.hedgeSimulator.OnTrade(func(trade types.Trade) {
+			s.positionExposure.Close(trade.PositionDelta())
+		})
+
+		session.MarketDataStream.OnKLineClosed(types.KLineWith(s.Symbol, types.Interval1m, func(kline types.KLine) {
+			if kline.Symbol != s.Symbol {
+				return
+			}
+			if err := s.hedgeSimulator.Move(kline.GetEndTime().Time()); err != nil {
+				s.logger.WithError(err).Error("failed to move hedge simulator")
+			}
+		}))
+
+		session.MarketDataStream.OnKLineClosed(types.KLineWith(s.Symbol, s.HedgeInterval, func(kline types.KLine) {
+			uncovered := s.positionExposure.GetUncovered()
+			if uncovered.IsZero() {
+				return
+			}
+
+			delta := uncovered.Neg()
+			s.positionExposure.Cover(uncovered)
+
+			if err := s.hedgeService.Hedge(uncovered, delta); err != nil {
+				s.logger.WithError(err).Error("failed to hedge")
+			}
+		}))
+	}
+
 	if service, ok := session.Exchange.(types.ExchangeOrderQueryService); ok {
 		s.orderQueryService = service
 	}
@@ -1539,7 +1596,7 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 	s.logger.Infof("persistence ttl: %s", s.PersistenceTTL.Duration())
 
 	if s.GridProfitStats == nil {
-		s.GridProfitStats = NewGridProfitStats(s.Market)
+		s.GridProfitStats = grid2.NewGridProfitStats(s.Market)
 	}
 	s.GridProfitStats.SetTTL(s.PersistenceTTL.Duration())
 
@@ -1597,14 +1654,14 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 
 	s.orderExecutor = orderExecutor
 
-	s.OnGridProfit(func(stats *GridProfitStats, profit *GridProfit) {
+	s.OnGridProfit(func(stats *grid2.GridProfitStats, profit *grid2.GridProfit) {
 		if profit != nil {
 			bbgo.Notify(profit)
 		}
 		bbgo.Notify(stats)
 	})
 
-	s.OnGridProfit(func(stats *GridProfitStats, profit *GridProfit) {
+	s.OnGridProfit(func(stats *grid2.GridProfitStats, profit *grid2.GridProfit) {
 		labels := s.getPrometheusLabels()
 		metricsGridProfit.With(labels).Set(stats.TotalQuoteProfit.Float64())
 	})
@@ -1616,13 +1673,15 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 			s.cancelWrite()
 		}
 
+		fmt.Println("hedgeSimulator ProfitStats:", s.hedgeSimulator.ProfitStats.PlainText())
+
 		if s.KeepOrdersWhenShutdown {
 			s.logger.Infof("keepOrdersWhenShutdown is set, will keep the orders on the exchange")
 			return
-		}
-
-		if err := s.CloseGrid(ctx); err != nil {
-			s.logger.WithError(err).Errorf("grid graceful order cancel error")
+		} else {
+			if err := s.CloseGrid(ctx); err != nil {
+				s.logger.WithError(err).Errorf("grid graceful order cancel error")
+			}
 		}
 	})
 

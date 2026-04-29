@@ -15,6 +15,7 @@ import (
 	"github.com/c9s/bbgo/pkg/envvar"
 	"github.com/c9s/bbgo/pkg/exchange"
 	"github.com/c9s/bbgo/pkg/service"
+	"github.com/c9s/bbgo/pkg/strategy/grid2"
 	"github.com/c9s/bbgo/pkg/types"
 )
 
@@ -174,7 +175,7 @@ func TestBacktestStrategy(t *testing.T) {
 		logger:          logrus.NewEntry(logrus.New()),
 		Symbol:          "BTCUSDT",
 		Market:          market,
-		GridProfitStats: NewGridProfitStats(market),
+		GridProfitStats: grid2.NewGridProfitStats(market),
 		UpperPrice:      number(60_000),
 		LowerPrice:      number(28_000),
 		GridNum:         100,

@@ -37,7 +37,7 @@ type GridProfitStats struct {
 	ttl time.Duration
 }
 
-func newGridProfitStats(market types.Market) *GridProfitStats {
+func NewGridProfitStats(market types.Market) *GridProfitStats {
 	return &GridProfitStats{
 		Symbol:           market.Symbol,
 		TotalBaseProfit:  fixedpoint.Zero,
