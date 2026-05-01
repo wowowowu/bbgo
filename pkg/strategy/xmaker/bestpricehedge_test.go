@@ -17,16 +17,11 @@ import (
 	"github.com/c9s/bbgo/pkg/types"
 )
 
-func init() {
+func TestSplitHedge_HedgeWithBestPriceAlgo(t *testing.T) {
 	tradeid.GlobalGenerator = tradeid.NewDeterministicGenerator()
-}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-// TestSplitHedge_HedgeWithProportionAlgo verifies that hedgeWithProportionAlgo:
-// - splits the hedge quantity according to ratios
-// - covers the strategy position exposure with the dispatched deltas
-// - forwards the cover deltas to each hedgeMarket's positionDeltaC channel
-func TestSplitHedge_HedgeWithProportionAlgo(t *testing.T) {
-	ctx := context.Background()
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 
@@ -39,42 +34,40 @@ func TestSplitHedge_HedgeWithProportionAlgo(t *testing.T) {
 	depth := Number(100.0)
 	hm1 := NewHedgeMarket(&HedgeMarketConfig{
 		SymbolSelector: market.Symbol,
-		HedgeInterval:  hedgeInterval,
 		QuotingDepth:   depth,
 	}, session1, market)
 	assert.NoError(t, hm1.stream.Connect(ctx))
 
 	hm2 := NewHedgeMarket(&HedgeMarketConfig{
 		SymbolSelector: market.Symbol,
-		HedgeInterval:  hedgeInterval,
 		QuotingDepth:   depth,
 	}, session2, market)
 	assert.NoError(t, hm2.stream.Connect(ctx))
 
-	// provide order book snapshots so GetQuotePrice() can work
-	orderBook := types.SliceOrderBook{
+	// hm1: better price for selling (higher bid)
+	md1.EmitBookSnapshot(types.SliceOrderBook{
+		Symbol: market.Symbol,
+		Bids:   types.PriceVolumeSlice{{Price: Number(10005), Volume: Number(100)}},
+		Asks:   types.PriceVolumeSlice{{Price: Number(10010), Volume: Number(100)}},
+	})
+
+	// hm2: worse price for selling (lower bid)
+	md2.EmitBookSnapshot(types.SliceOrderBook{
 		Symbol: market.Symbol,
 		Bids:   types.PriceVolumeSlice{{Price: Number(10000), Volume: Number(100)}},
 		Asks:   types.PriceVolumeSlice{{Price: Number(10010), Volume: Number(100)}},
-	}
-	md1.EmitBookSnapshot(orderBook)
-	md2.EmitBookSnapshot(orderBook)
+	})
 
-	// create a minimal strategy with position exposure and maker market
 	strategy := &Strategy{}
 	strategy.positionExposure = bbgo.NewPositionExposure(market.Symbol)
 	strategy.makerMarket = market
 	strategy.logger = logrus.New()
 
-	// build split hedge with proportion algo
 	split := &SplitHedge{
 		Enabled: true,
-		Algo:    SplitHedgeAlgoProportion,
-		ProportionAlgo: &SplitHedgeProportionAlgo{
-			ProportionMarkets: []*SplitHedgeProportionMarket{
-				{Name: "m1", Ratio: Number(0.5)}, // 50%
-				{Name: "m2"},                     // remaining
-			},
+		BestPriceHedge: &BestPriceHedge{
+			Enabled:     true,
+			BelowAmount: Number(100000), // high enough for this test
 		},
 		hedgeMarketInstances: map[string]*HedgeMarket{
 			"m1": hm1,
@@ -88,30 +81,33 @@ func TestSplitHedge_HedgeWithProportionAlgo(t *testing.T) {
 	uncovered := Number(2.0)
 	hedgeDelta := uncovered.Neg()
 
-	err := split.hedgeWithProportionAlgo(ctx, uncovered, hedgeDelta)
+	handled, err := split.hedgeWithBestPriceAlgo(ctx, uncovered, hedgeDelta)
 	assert.NoError(t, err)
+	assert.True(t, handled)
 
-	// The strategy pending exposure should be covered by +2 (sum of dispatched deltas)
+	// Strategy pending exposure should be covered by +2
 	assert.Equal(t, Number(2.0), strategy.positionExposure.GetPending())
 
-	// Expect two dispatched cover deltas: +1 to each hedge market (sell side -> cover +quantity)
-	expectCover := Number(1.0)
-
-	// give a tiny time for channel writes to complete (channels are buffered, but be safe)
-	time.Sleep(stepTime)
-
-	// ensure both hedge markets received the correct cover delta
+	// hm1 should have received the cover delta because it has the best bid (10005 > 10000)
 	select {
 	case d := <-hm1.positionDeltaC:
-		assert.Equal(t, expectCover, d, "hm1 cover delta")
+		assert.Equal(t, Number(2.0), d, "hm1 should receive full cover delta")
 	case <-time.After(200 * time.Millisecond):
 		t.Fatalf("timeout waiting for hm1 position delta")
 	}
 
+	// hm2 should not have received any delta
 	select {
-	case d := <-hm2.positionDeltaC:
-		assert.Equal(t, expectCover, d, "hm2 cover delta")
-	case <-time.After(200 * time.Millisecond):
-		t.Fatalf("timeout waiting for hm2 position delta")
+	case <-hm2.positionDeltaC:
+		t.Fatalf("hm2 should not receive any delta")
+	default:
 	}
+
+	// Test fallback: position value exceeds BelowAmount
+	strategy.positionExposure = bbgo.NewPositionExposure(market.Symbol)
+	split.BestPriceHedge.BelowAmount = Number(100) // very low
+
+	handled, err = split.hedgeWithBestPriceAlgo(ctx, uncovered, hedgeDelta)
+	assert.NoError(t, err)
+	assert.False(t, handled, "should not be handled when position value is too high")
 }

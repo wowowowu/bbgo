@@ -54,6 +54,7 @@ import (
 	_ "github.com/c9s/bbgo/pkg/strategy/xfixedmaker"
 	_ "github.com/c9s/bbgo/pkg/strategy/xfunding"
 	_ "github.com/c9s/bbgo/pkg/strategy/xgap"
+	_ "github.com/c9s/bbgo/pkg/strategy/xhedgegrid"
 	_ "github.com/c9s/bbgo/pkg/strategy/xmaker"
 	_ "github.com/c9s/bbgo/pkg/strategy/xnav"
 	_ "github.com/c9s/bbgo/pkg/strategy/xpremium"

@@ -5,7 +5,6 @@ import (
 	"os"
 	"path"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -19,16 +18,27 @@ func TestVolumeProfile(t *testing.T) {
 		assert.NoError(t, file.Close())
 	}()
 
-	candles, err := csvsource.NewCSVKLineReader(csv.NewReader(file)).ReadAll(time.Minute)
+	reader := csv.NewReader(file)
+
+	candles, err := csvsource.NewCSVKLineReader(reader, "BTCUSDT", types.Interval1m).ReadAll()
 	assert.NoError(t, err)
+	assert.NotEmptyf(t, candles, "candles should not be empty")
 
 	stream := &types.StandardStream{}
-	kLines := KLines(stream, "", "")
+	kLines := KLines(stream, "BTCUSDT", types.Interval1m)
 	ind := NewVolumeProfile(kLines, 10)
 
 	for _, candle := range candles {
+		t.Logf("emitting kline: %s", candle.String())
 		stream.EmitKLineClosed(candle)
 	}
+
+	t.Logf("VP.LOW: %v", ind.VP.Low)
+	t.Logf("VP.VAL: %v", ind.VP.VAL)
+	t.Logf("VP.POC: %v", ind.VP.POC)
+	t.Logf("VP.VAH: %v", ind.VP.VAH)
+	t.Logf("VP.HIGH: %v", ind.VP.High)
+
 	assert.InDelta(t, 36512.7, ind.VP.Low, 0.01, "VP.LOW")
 	assert.InDelta(t, 36600.811111108334, ind.VP.VAL, 0.01, "VP.VAL")
 	assert.InDelta(t, 36612.559259256115, ind.VP.POC, 0.01, "VP.POC")

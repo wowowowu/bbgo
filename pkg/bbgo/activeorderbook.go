@@ -368,7 +368,7 @@ func (b *ActiveOrderBook) Update(order types.Order) {
 		b.logger.Warnf("[ActiveOrderBook] uncleared pending order updates are too many (%d)", b.pendingOrderUpdates.Len())
 	}
 
-	if b.orders.Len() > 20 {
+	if b.orders.Len() > 200 {
 		b.logger.Warnf("[ActiveOrderBook] uncleared active order objects are too many (%d)", b.orders.Len())
 	}
 

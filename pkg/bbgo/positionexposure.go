@@ -1,4 +1,4 @@
-package xmaker
+package bbgo
 
 import (
 	"fmt"
@@ -8,7 +8,28 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/types"
 )
+
+type Delta fixedpoint.Value
+
+func (d Delta) Side() types.SideType {
+	side := types.SideTypeBuy
+
+	if fixedpoint.Value(d).IsZero() {
+		side = types.SideTypeNone
+	}
+
+	if fixedpoint.Value(d).Sign() < 0 {
+		side = types.SideTypeSell
+	}
+
+	return side
+}
+
+func (d Delta) Quantity() fixedpoint.Value {
+	return fixedpoint.Value(d).Abs()
+}
 
 var positionExposurePendingMetrics = promauto.NewGaugeVec(
 	prometheus.GaugeOpts{
@@ -64,12 +85,24 @@ type PositionExposure struct {
 func NewPositionExposure(symbol string) *PositionExposure {
 	return &PositionExposure{
 		symbol: symbol,
-		logger: log,
+		logger: logrus.WithField("symbol", symbol),
 	}
 }
 
 func (m *PositionExposure) SetLogger(logger logrus.FieldLogger) {
 	m.logger = logger
+}
+
+func (m *PositionExposure) GetSymbol() string {
+	return m.symbol
+}
+
+func (m *PositionExposure) GetNet() fixedpoint.Value {
+	return m.net.Get()
+}
+
+func (m *PositionExposure) GetPending() fixedpoint.Value {
+	return m.pending.Get()
 }
 
 func (m *PositionExposure) Open(delta fixedpoint.Value) {

@@ -5,21 +5,20 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/c9s/bbgo/pkg/types"
 )
 
 // KLineReader is an interface for reading candlesticks.
 type KLineReader interface {
-	Read(interval time.Duration) (types.KLine, error)
-	ReadAll(interval time.Duration) ([]types.KLine, error)
+	Read() (types.KLine, error)
+	ReadAll() ([]types.KLine, error)
 }
 
-// ReadAllCsv reads all the .csv files in a given directory or a single file into a slice of KLines.
+// ReadAllKLineCsv reads all the .csv files in a given directory or a single file into a slice of KLines.
 // Wraps a default CSVKLineReader with Binance decoder for convenience.
 // For finer grained memory management use the base kline reader.
-func ReadAllCsv(dir string, interval time.Duration) ([]types.KLine, error) {
+func ReadAllKLineCsv(dir string, symbol string, interval types.Interval) ([]types.KLine, error) {
 	var klines []types.KLine
 
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -32,14 +31,17 @@ func ReadAllCsv(dir string, interval time.Duration) ([]types.KLine, error) {
 		if filepath.Ext(path) != ".csv" {
 			return nil
 		}
+
 		file, err := os.Open(path)
 		if err != nil {
 			return err
 		}
+
 		//nolint:errcheck // Read ops only so safe to ignore err return
 		defer file.Close()
-		reader := NewCSVKLineReader(csv.NewReader(file))
-		newKlines, err := reader.ReadAll(interval)
+
+		reader := NewCSVKLineReader(csv.NewReader(file), symbol, interval)
+		newKlines, err := reader.ReadAll()
 		if err != nil {
 			return err
 		}

@@ -1,4 +1,4 @@
-package xmaker
+package bbgo
 
 import (
 	"testing"

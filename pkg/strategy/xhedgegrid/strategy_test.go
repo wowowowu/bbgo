@@ -13,6 +13,7 @@ import (
 
 	"github.com/c9s/bbgo/pkg/core"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2"
 	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
 	gridmocks "github.com/c9s/bbgo/pkg/strategy/grid2/mocks"
 	"github.com/c9s/bbgo/pkg/types"
@@ -707,7 +708,7 @@ func newTestStrategy(va ...string) *Strategy {
 		logger:           logrus.NewEntry(logrus.New()),
 		Symbol:           symbol,
 		Market:           market,
-		GridProfitStats:  NewGridProfitStats(market),
+		GridProfitStats:  grid2.NewGridProfitStats(market),
 		UpperPrice:       number(20_000),
 		LowerPrice:       number(10_000),
 		GridNum:          11,

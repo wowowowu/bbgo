@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -37,7 +38,7 @@ type GridProfitStats struct {
 	ttl time.Duration
 }
 
-func newGridProfitStats(market types.Market) *GridProfitStats {
+func NewGridProfitStats(market types.Market) *GridProfitStats {
 	return &GridProfitStats{
 		Symbol:           market.Symbol,
 		TotalBaseProfit:  fixedpoint.Zero,
@@ -126,10 +127,18 @@ func (s *GridProfitStats) SlackAttachment() slack.Attachment {
 		},
 	}
 
+	if !s.Volume.IsZero() {
+		fields = append(fields, slack.AttachmentField{
+			Title: "Volume",
+			Value: s.Market.FormatVolume(s.Volume) + " " + s.Market.QuoteCurrency,
+			Short: true,
+		})
+	}
+
 	if !s.FloatProfit.IsZero() {
 		fields = append(fields, slack.AttachmentField{
 			Title: "Float Profit",
-			Value: style.PnLSignString(s.FloatProfit),
+			Value: style.PnLSignString(s.FloatProfit) + " " + s.Market.QuoteCurrency,
 			Short: true,
 		})
 	}
@@ -137,7 +146,7 @@ func (s *GridProfitStats) SlackAttachment() slack.Attachment {
 	if !s.GridProfit.IsZero() {
 		fields = append(fields, slack.AttachmentField{
 			Title: "Total Grid Profit",
-			Value: style.PnLSignString(s.GridProfit),
+			Value: style.PnLSignString(s.GridProfit) + " " + s.Market.QuoteCurrency,
 			Short: true,
 		})
 	}
@@ -145,7 +154,7 @@ func (s *GridProfitStats) SlackAttachment() slack.Attachment {
 	if !s.TotalQuoteProfit.IsZero() {
 		fields = append(fields, slack.AttachmentField{
 			Title: "Total Quote Profit",
-			Value: style.PnLSignString(s.TotalQuoteProfit),
+			Value: style.PnLSignString(s.TotalQuoteProfit) + " " + s.Market.QuoteCurrency,
 			Short: true,
 		})
 	}
@@ -153,13 +162,20 @@ func (s *GridProfitStats) SlackAttachment() slack.Attachment {
 	if !s.TotalBaseProfit.IsZero() {
 		fields = append(fields, slack.AttachmentField{
 			Title: "Total Base Profit",
-			Value: style.PnLSignString(s.TotalBaseProfit),
+			Value: style.PnLSignString(s.TotalBaseProfit) + " " + s.Market.BaseCurrency,
 			Short: true,
 		})
 	}
 
 	if len(s.TotalFee) > 0 {
-		for feeCurrency, fee := range s.TotalFee {
+		var feeCurrencies []string
+		for feeCurrency := range s.TotalFee {
+			feeCurrencies = append(feeCurrencies, feeCurrency)
+		}
+		sort.Strings(feeCurrencies)
+
+		for _, feeCurrency := range feeCurrencies {
+			fee := s.TotalFee[feeCurrency]
 			fields = append(fields, slack.AttachmentField{
 				Title: fmt.Sprintf("Fee (%s)", feeCurrency),
 				Value: fee.String() + " " + feeCurrency,
@@ -170,7 +186,7 @@ func (s *GridProfitStats) SlackAttachment() slack.Attachment {
 
 	footer := "Total grid profit stats"
 	if s.Since != nil {
-		footer += fmt.Sprintf(" since %s", s.Since.String())
+		footer += fmt.Sprintf(" since %s", s.Since.Format(time.RFC3339))
 	}
 
 	title := fmt.Sprintf("%s Grid Profit Stats", s.Symbol)
@@ -187,39 +203,46 @@ func (s *GridProfitStats) String() string {
 }
 
 func (s *GridProfitStats) PlainText() string {
-	var o string
+	var b strings.Builder
 
-	o = fmt.Sprintf("%s Grid Profit Stats", s.Symbol)
+	fmt.Fprintf(&b, "%s Grid Profit Stats:\n", s.Symbol)
 
-	o += fmt.Sprintf(" Arbitrage count: %d", s.ArbitrageCount)
+	if s.Since != nil {
+		fmt.Fprintf(&b, "- Since: %s\n", s.Since.Format(time.RFC3339))
+	}
 
-	if !s.FloatProfit.IsZero() {
-		o += " Float profit: " + style.PnLSignString(s.FloatProfit)
+	fmt.Fprintf(&b, "- Arbitrage count: %d\n", s.ArbitrageCount)
+
+	if !s.Volume.IsZero() {
+		fmt.Fprintf(&b, "- Volume: %s %s\n", s.Market.FormatVolume(s.Volume), s.Market.QuoteCurrency)
 	}
 
 	if !s.GridProfit.IsZero() {
-		o += " Grid profit: " + style.PnLSignString(s.GridProfit)
+		fmt.Fprintf(&b, "- Grid profit: %s %s\n", style.PnLSignString(s.GridProfit), s.Market.QuoteCurrency)
+	}
+
+	if !s.FloatProfit.IsZero() {
+		fmt.Fprintf(&b, "- Float profit: %s %s\n", style.PnLSignString(s.FloatProfit), s.Market.QuoteCurrency)
 	}
 
 	if !s.TotalQuoteProfit.IsZero() {
-		o += " Total quote profit: " + style.PnLSignString(s.TotalQuoteProfit) + " " + s.Market.QuoteCurrency
+		fmt.Fprintf(&b, "- Total quote profit: %s %s\n", style.PnLSignString(s.TotalQuoteProfit), s.Market.QuoteCurrency)
 	}
 
 	if !s.TotalBaseProfit.IsZero() {
-		o += " Total base profit: " + style.PnLSignString(s.TotalBaseProfit) + " " + s.Market.BaseCurrency
+		fmt.Fprintf(&b, "- Total base profit: %s %s\n", style.PnLSignString(s.TotalBaseProfit), s.Market.BaseCurrency)
 	}
 
 	if len(s.TotalFee) > 0 {
+		var feeParts []string
 		for feeCurrency, fee := range s.TotalFee {
-			o += fmt.Sprintf(" Fee (%s)", feeCurrency) + fee.String() + " " + feeCurrency
+			feeParts = append(feeParts, fee.String()+" "+feeCurrency)
 		}
+		sort.Strings(feeParts)
+		fmt.Fprintf(&b, "- Total fee: %s\n", strings.Join(feeParts, ", "))
 	}
 
-	if s.Since != nil {
-		o += fmt.Sprintf(" Since %s", s.Since.String())
-	}
-
-	return o
+	return b.String()
 }
 
 // Implements common.TabularStats interface

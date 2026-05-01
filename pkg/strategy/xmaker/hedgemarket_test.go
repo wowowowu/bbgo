@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	. "github.com/c9s/bbgo/pkg/testing/testhelper"
 	"github.com/c9s/bbgo/pkg/tradeid"
@@ -208,7 +209,7 @@ func TestHedgeMarket_RedispatchPositionAfterFailure(t *testing.T) {
 		QuotingDepth:   depth,
 	}, session, market)
 
-	mainPosition := NewPositionExposure("BTCUSDT")
+	mainPosition := bbgo.NewPositionExposure("BTCUSDT")
 	redispatchTriggered := false
 	hm.OnRedispatchPosition(func(position fixedpoint.Value) {
 		redispatchTriggered = true
@@ -233,8 +234,8 @@ func TestHedgeMarket_RedispatchPositionAfterFailure(t *testing.T) {
 	delta := Number(1.0)
 	mainPosition.Open(delta)
 	mainPosition.Cover(delta) // mark as covered since it's dispatched to hedge market
-	assert.Equal(t, Number(1.0), mainPosition.pending.Get())
-	assert.Equal(t, Number(1.0), mainPosition.net.Get())
+	assert.Equal(t, Number(1.0), mainPosition.GetPending())
+	assert.Equal(t, Number(1.0), mainPosition.GetNet())
 
 	hm.positionExposure.Open(delta)
 
@@ -244,12 +245,12 @@ func TestHedgeMarket_RedispatchPositionAfterFailure(t *testing.T) {
 	<-hm.hedgedC
 	assert.True(t, redispatchTriggered)
 
-	assert.Equal(t, Number(0.0), hm.positionExposure.pending.Get())
-	assert.Equal(t, Number(0.0), hm.positionExposure.net.Get())
+	assert.Equal(t, Number(0.0), hm.positionExposure.GetPending())
+	assert.Equal(t, Number(0.0), hm.positionExposure.GetNet())
 	assert.Equal(t, Number(0.0), hm.positionExposure.GetUncovered())
 
-	assert.Equal(t, Number(0.0), mainPosition.pending.Get(), "main position should have 0.0 pending after redispatch")
-	assert.Equal(t, Number(1.0), mainPosition.net.Get(), "main position should still have 1.0 net")
+	assert.Equal(t, Number(0.0), mainPosition.GetPending(), "main position should have 0.0 pending after redispatch")
+	assert.Equal(t, Number(1.0), mainPosition.GetNet(), "main position should still have 1.0 net")
 	assert.Equal(t, Number(1.0), mainPosition.GetUncovered(), "main position should have 1.0 uncovered")
 }
 
@@ -353,8 +354,8 @@ func TestHedgeMarket_startAndHedge(t *testing.T) {
 
 	time.Sleep(stepTime)
 
-	assert.Equal(t, Number(1.0), hm.positionExposure.pending.Get())
-	assert.Equal(t, Number(1.0), hm.positionExposure.net.Get())
+	assert.Equal(t, Number(1.0), hm.positionExposure.GetPending())
+	assert.Equal(t, Number(1.0), hm.positionExposure.GetNet())
 
 	userDataStream.EmitTradeUpdate(types.Trade{
 		ID:            2,
@@ -372,8 +373,8 @@ func TestHedgeMarket_startAndHedge(t *testing.T) {
 
 	time.Sleep(stepTime)
 
-	assert.Equal(t, Number(0.0), hm.positionExposure.pending.Get())
-	assert.Equal(t, Number(0.0), hm.positionExposure.net.Get())
+	assert.Equal(t, Number(0.0), hm.positionExposure.GetPending())
+	assert.Equal(t, Number(0.0), hm.positionExposure.GetNet())
 
 	cancel()
 

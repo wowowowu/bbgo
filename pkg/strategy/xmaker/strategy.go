@@ -240,7 +240,7 @@ type Strategy struct {
 	tradingCtx    context.Context
 	cancelTrading context.CancelFunc
 
-	positionExposure *PositionExposure
+	positionExposure *bbgo.PositionExposure
 
 	sourceBook, makerBook *types.StreamOrderBook
 	depthSourceBook       *types.DepthBook
@@ -498,7 +498,7 @@ func (s *Strategy) Initialize() error {
 		}
 	}
 
-	s.positionExposure = NewPositionExposure(s.Symbol)
+	s.positionExposure = bbgo.NewPositionExposure(s.Symbol)
 	s.positionExposure.SetLogger(s.logger)
 	s.positionExposure.SetMetricsLabels(ID, s.InstanceID(), s.MakerExchange, s.Symbol)
 	for _, sig := range s.SignalConfigList.Signals {
@@ -2512,7 +2512,7 @@ func (s *Strategy) houseCleanWorker(ctx context.Context) {
 }
 
 func (s *Strategy) getCoveredPosition() fixedpoint.Value {
-	coveredPosition := s.positionExposure.pending.Get()
+	coveredPosition := s.positionExposure.GetPending()
 	coveredPositionMetrics.With(s.metricsLabels).Set(coveredPosition.Float64())
 	return coveredPosition
 }
