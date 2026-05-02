@@ -14,7 +14,6 @@ import (
 )
 
 //go:generate stringer -type=RoundState
-
 type RoundState int
 
 const (
@@ -37,9 +36,8 @@ type transferRetry struct {
 type ArbitrageRound struct {
 	mu sync.Mutex
 
-	CollectedFunding     fixedpoint.Value
-	FundingRate          fixedpoint.Value
-	FundingIntervalHours int
+	fundingRate          fixedpoint.Value
+	fundingIntervalHours int
 
 	// TWAP workers
 	spotWorker      *TWAPWorker
@@ -58,16 +56,41 @@ type ArbitrageRound struct {
 	startTime time.Time
 }
 
-func NewArbitrageRound(spotTwap, futuresTwap *TWAPWorker, futuresTransfer FuturesTransfer) *ArbitrageRound {
+func NewArbitrageRound(
+	fundingRate fixedpoint.Value, fundingIntervalHours int,
+	spotTwap, futuresTwap *TWAPWorker, futuresTransfer FuturesTransfer) *ArbitrageRound {
 	return &ArbitrageRound{
-		spotWorker:         spotTwap,
-		futuresWorker:      futuresTwap,
-		futuresTransfer:    futuresTransfer,
-		transferAsset:      spotTwap.Market().BaseCurrency,
-		state:              PositionOpening,
-		retryTransfers:     make(map[uint64]transferRetry),
-		retryTransferTickC: make(chan time.Time, 1),
+		fundingRate:          fundingRate,
+		fundingIntervalHours: fundingIntervalHours,
+		spotWorker:           spotTwap,
+		futuresWorker:        futuresTwap,
+		futuresTransfer:      futuresTransfer,
+		transferAsset:        spotTwap.Market().BaseCurrency,
+		state:                PositionOpening,
+		retryTransfers:       make(map[uint64]transferRetry),
+		retryTransferTickC:   make(chan time.Time, 1),
 	}
+}
+
+func (p *ArbitrageRound) CollectedFunding(currentTime time.Time) fixedpoint.Value {
+	if p.startTime.IsZero() {
+		return fixedpoint.Zero
+	}
+
+	// Funding payments happen at fixed interval boundaries (e.g., 00:00, 08:00, 16:00 UTC for 8-hour intervals).
+	// We need to count how many interval boundaries have been crossed between startTime and currentTime.
+	intervalDuration := time.Duration(p.fundingIntervalHours) * time.Hour
+	intervalStartTime := p.startTime.Truncate(intervalDuration)
+
+	// calculate how many intervals have passed since the start time
+	elapsedHours := currentTime.Sub(intervalStartTime).Hours()
+	numIntervals := fixedpoint.NewFromFloat(elapsedHours / float64(p.fundingIntervalHours))
+	numIntervals = numIntervals.Round(0, fixedpoint.Down)
+
+	// funding rate > 0 -> we short futures -> funding payment = -futures position * funding rate * num intervals
+	// funding rate < 0 -> we long futures -> funding payment = futures position * -funding rate * num intervals
+	futuresPosition := p.futuresWorker.Position().Base
+	return futuresPosition.Mul(p.fundingRate).Mul(numIntervals).Neg()
 }
 
 func (p *ArbitrageRound) Start(ctx context.Context, currentTime time.Time) {
@@ -103,7 +126,7 @@ func (p *ArbitrageRound) retryTransferWorker(ctx context.Context) {
 					continue
 				}
 				p.HandleSpotTrade(transfer.Trade, currentTime)
-				p.logger.Infof("retry transfer succeeded (trade: %d): %s %s", tradeID, transfer.Amount.String(), p.transferAsset)
+				p.logger.Infof("retry transfer succeeded (trade: %d): %s %s", tradeID, transfer.Trade.Quantity.String(), p.transferAsset)
 			}
 			p.mu.Unlock()
 		}
@@ -171,7 +194,7 @@ func (p *ArbitrageRound) GetState() RoundState {
 }
 
 func (p *ArbitrageRound) AnnualizedRate() fixedpoint.Value {
-	return AnnualizedRate(p.FundingRate, p.FundingIntervalHours)
+	return AnnualizedRate(p.fundingRate, p.fundingIntervalHours)
 }
 
 func (p *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBook, futuresOrderBook types.OrderBook) {

@@ -136,6 +136,7 @@ func (s *MarketSelector) SelectMarkets(ctx context.Context, symbols []string) ([
 		// filter by funding rate direction
 		// short futures -> positive funding rate for funding income
 		// long futures -> negative funding rate for funding income
+		// position sign * funding rate should be negative for positive funding income
 		if getPostionSign(s.FuturesDirection)*idx.LastFundingRate.Sign() > 0 {
 			continue
 		}
