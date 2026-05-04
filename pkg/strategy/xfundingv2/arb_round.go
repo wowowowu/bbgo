@@ -54,7 +54,8 @@ type ArbitrageRound struct {
 	retryTransfers     map[uint64]transferRetry
 
 	fundingFeeRecords map[int64]FundingFee
-	state             RoundState
+
+	state RoundState
 
 	logger logrus.FieldLogger
 
@@ -93,6 +94,13 @@ func (r *ArbitrageRound) CollectedFunding(ctx context.Context, currentTime time.
 		totalFunding = totalFunding.Add(fee.Amount)
 	}
 	return totalFunding
+}
+
+func (r *ArbitrageRound) SyncFundingFeeRecords(ctx context.Context, currentTime time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.syncFundingFeeRecords(ctx, currentTime)
 }
 
 func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime time.Time) {
