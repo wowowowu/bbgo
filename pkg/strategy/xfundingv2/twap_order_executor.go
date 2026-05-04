@@ -20,7 +20,7 @@ type TWAPExecutor struct {
 	market   types.Market
 	executor *bbgo.GeneralOrderExecutor
 
-	ordersMap map[types.Order]struct{}
+	ordersMap map[uint64]struct{}
 
 	logger logrus.FieldLogger
 }
@@ -40,7 +40,7 @@ func NewTWAPOrderExecutor(
 		executor: executor,
 		market:   market,
 
-		ordersMap: make(map[types.Order]struct{}),
+		ordersMap: make(map[uint64]struct{}),
 	}
 }
 
@@ -101,7 +101,32 @@ func (o *TWAPExecutor) SyncOrder(order types.Order) error {
 }
 
 func (o *TWAPExecutor) GetOrder(orderID uint64) (types.Order, bool) {
+	if _, exists := o.ordersMap[orderID]; !exists {
+		return types.Order{}, false
+	}
 	return o.executor.OrderStore().Get(orderID)
+}
+
+func (o *TWAPExecutor) AllOrders() []types.Order {
+	var orders []types.Order
+
+	for orderID := range o.ordersMap {
+		if order, exists := o.executor.OrderStore().Get(orderID); exists {
+			orders = append(orders, order)
+		}
+	}
+	return orders
+}
+
+func (o *TWAPExecutor) AllTrades() []types.Trade {
+	var trades []types.Trade
+	for orderID := range o.ordersMap {
+		if order, exists := o.executor.OrderStore().Get(orderID); exists {
+			orderTrades := o.executor.TradeCollector().TradeStore().GetOrderTrades(order)
+			trades = append(trades, orderTrades...)
+		}
+	}
+	return trades
 }
 
 // place order
@@ -126,7 +151,7 @@ func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType
 	if err != nil || len(createdOrders) == 0 {
 		return nil, fmt.Errorf("failed to submit order: %+v, %v", order, err)
 	}
-	o.ordersMap[createdOrders[0]] = struct{}{}
+	o.ordersMap[createdOrders[0].OrderID] = struct{}{}
 	return &createdOrders[0], nil
 }
 
