@@ -9,6 +9,8 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/c9s/bbgo/pkg/bbgo"
+	"github.com/c9s/bbgo/pkg/exchange/batch"
+	"github.com/c9s/bbgo/pkg/exchange/binance/binanceapi"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 )
@@ -24,9 +26,10 @@ const (
 	RoundClosed
 )
 
-type FuturesTransfer interface {
+type FuturesService interface {
+	batch.BinanceFuturesIncomeHistoryService
+
 	TransferFuturesAccountAsset(ctx context.Context, asset string, amount fixedpoint.Value, io types.TransferDirection) error
-	QueryAccountBalances(ctx context.Context) (types.BalanceMap, error)
 }
 
 type transferRetry struct {
@@ -37,20 +40,21 @@ type transferRetry struct {
 type ArbitrageRound struct {
 	mu sync.Mutex
 
-	fundingRate          fixedpoint.Value
+	triggeredFundingRate fixedpoint.Value
 	fundingIntervalHours int
 
 	// TWAP workers
-	spotWorker      *TWAPWorker
-	futuresWorker   *TWAPWorker
-	futuresTransfer FuturesTransfer
-	transferAsset   string // base asset, e.g. "BTC"
+	spotWorker     *TWAPWorker
+	futuresWorker  *TWAPWorker
+	futuresService FuturesService
+	transferAsset  string // base asset, e.g. "BTC"
 
 	retryDuration      time.Duration
 	retryTransferTickC chan time.Time
 	retryTransfers     map[uint64]transferRetry
 
-	state RoundState
+	fundingFeeRecords map[int64]FundingFee
+	state             RoundState
 
 	logger logrus.FieldLogger
 
@@ -59,73 +63,111 @@ type ArbitrageRound struct {
 
 func NewArbitrageRound(
 	fundingRate fixedpoint.Value, fundingIntervalHours int,
-	spotTwap, futuresTwap *TWAPWorker, futuresTransfer FuturesTransfer) *ArbitrageRound {
+	spotTwap, futuresTwap *TWAPWorker, futuresService FuturesService) *ArbitrageRound {
 	return &ArbitrageRound{
-		fundingRate:          fundingRate,
+		triggeredFundingRate: fundingRate,
 		fundingIntervalHours: fundingIntervalHours,
 		spotWorker:           spotTwap,
 		futuresWorker:        futuresTwap,
-		futuresTransfer:      futuresTransfer,
+		futuresService:       futuresService,
 		transferAsset:        spotTwap.Market().BaseCurrency,
 		state:                RoundPending,
 		retryTransfers:       make(map[uint64]transferRetry),
 		retryTransferTickC:   make(chan time.Time, 1),
+		fundingFeeRecords:    make(map[int64]FundingFee),
 	}
 }
 
-func (p *ArbitrageRound) CollectedFunding(currentTime time.Time) fixedpoint.Value {
-	if p.startTime.IsZero() {
+func (r *ArbitrageRound) CollectedFunding(ctx context.Context, currentTime time.Time) fixedpoint.Value {
+	if r.startTime.IsZero() {
 		return fixedpoint.Zero
 	}
 
-	// Funding payments happen at fixed interval boundaries (e.g., 00:00, 08:00, 16:00 UTC for 8-hour intervals).
-	// We need to count how many interval boundaries have been crossed between startTime and currentTime.
-	intervalDuration := time.Duration(p.fundingIntervalHours) * time.Hour
-	intervalStartTime := p.startTime.Truncate(intervalDuration)
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	// calculate how many intervals have passed since the start time
-	elapsedHours := currentTime.Sub(intervalStartTime).Hours()
-	numIntervals := fixedpoint.NewFromFloat(elapsedHours / float64(p.fundingIntervalHours))
-	numIntervals = numIntervals.Round(0, fixedpoint.Down)
+	r.syncFundingFeeRecords(ctx, currentTime)
 
-	// funding rate > 0 -> we short futures -> funding payment = -futures position * funding rate * num intervals
-	// funding rate < 0 -> we long futures -> funding payment = futures position * -funding rate * num intervals
-	futuresPosition := p.futuresWorker.Position().Base
-	return futuresPosition.Mul(p.fundingRate).Mul(numIntervals).Neg()
+	var totalFunding fixedpoint.Value
+	for _, fee := range r.fundingFeeRecords {
+		totalFunding = totalFunding.Add(fee.Amount)
+	}
+	return totalFunding
 }
 
-func (p *ArbitrageRound) Start(ctx context.Context, currentTime time.Time) {
-	if p.startTime.IsZero() {
-		p.spotWorker.Start(ctx, currentTime)
-		p.futuresWorker.Start(ctx, currentTime)
-
-		go p.retryTransferWorker(ctx)
-
-		p.startTime = currentTime
-		p.state = RoundOpening
+func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime time.Time) {
+	if r.startTime.IsZero() || r.startTime.After(currentTime) {
+		return
 	}
 
-}
-
-func (p *ArbitrageRound) Stop() {
-	p.spotWorker.Stop()
-	p.futuresWorker.Stop()
-	close(p.retryTransferTickC)
-}
-
-func (p *ArbitrageRound) retryTransferWorker(ctx context.Context) {
+	q := batch.BinanceFuturesIncomeBatchQuery{
+		BinanceFuturesIncomeHistoryService: r.futuresService,
+	}
+	symbol := r.futuresWorker.Symbol()
+	dataC, errC := q.Query(ctx, symbol, binanceapi.FuturesIncomeFundingFee, r.startTime, currentTime)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case currentTime, ok := <-p.retryTransferTickC:
+
+		case income, ok := <-dataC:
+			if !ok {
+				return
+			}
+			switch income.IncomeType {
+			case binanceapi.FuturesIncomeFundingFee:
+				record := FundingFee{
+					Asset:  income.Asset,
+					Amount: income.Income,
+					Txn:    income.TranId,
+					Time:   income.Time.Time(),
+				}
+				r.fundingFeeRecords[income.TranId] = record
+			}
+		case err, ok := <-errC:
+			if !ok {
+				return
+			}
+
+			r.logger.WithError(err).Errorf("unable to query futures income history")
+			return
+
+		}
+	}
+}
+
+func (r *ArbitrageRound) Start(ctx context.Context, currentTime time.Time) {
+	if r.startTime.IsZero() {
+		r.spotWorker.Start(ctx, currentTime)
+		r.futuresWorker.Start(ctx, currentTime)
+
+		go r.retryTransferWorker(ctx)
+
+		r.startTime = currentTime
+		r.state = RoundOpening
+	}
+
+}
+
+func (r *ArbitrageRound) Stop() {
+	r.spotWorker.Stop()
+	r.futuresWorker.Stop()
+	close(r.retryTransferTickC)
+}
+
+func (r *ArbitrageRound) retryTransferWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case currentTime, ok := <-r.retryTransferTickC:
 			if !ok {
 				return
 			}
 			// retry failed transfers if any
-			p.mu.Lock()
-			for tradeID, transfer := range p.retryTransfers {
-				retryDuration := p.retryDuration
+			r.mu.Lock()
+			for tradeID, transfer := range r.retryTransfers {
+				retryDuration := r.retryDuration
 				if retryDuration == 0 {
 					// default retry duration is 10 minutes
 					retryDuration = 10 * time.Minute
@@ -133,143 +175,143 @@ func (p *ArbitrageRound) retryTransferWorker(ctx context.Context) {
 				if currentTime.Sub(transfer.LastTried) < retryDuration {
 					continue
 				}
-				p.HandleSpotTrade(transfer.Trade, currentTime)
-				p.logger.Infof("retry transfer succeeded (trade: %d): %s %s", tradeID, transfer.Trade.Quantity.String(), p.transferAsset)
+				r.HandleSpotTrade(transfer.Trade, currentTime)
+				r.logger.Infof("retry transfer succeeded (trade: %d): %s %s", tradeID, transfer.Trade.Quantity.String(), r.transferAsset)
 			}
-			p.mu.Unlock()
+			r.mu.Unlock()
 		}
 	}
 }
 
-func (p *ArbitrageRound) SetRetryDuration(d time.Duration) {
-	p.retryDuration = d
+func (r *ArbitrageRound) SetRetryDuration(d time.Duration) {
+	r.retryDuration = d
 }
 
-func (p *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Time) {
+func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Time) {
 	// lock the round to ensure the state is updated correctly when receiving trade updates from spot worker
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	if trade.Symbol != p.spotWorker.Symbol() || trade.IsFutures {
+	if trade.Symbol != r.spotWorker.Symbol() || trade.IsFutures {
 		return
 	}
 
 	// try to transfer asset from futures to spot.
 	// if transfer fails, retry in the next tick until it succeeds
-	if err := p.futuresTransfer.TransferFuturesAccountAsset(
-		p.spotWorker.ctx, p.transferAsset, trade.Quantity, types.TransferOut,
+	if err := r.futuresService.TransferFuturesAccountAsset(
+		r.spotWorker.ctx, r.transferAsset, trade.Quantity, types.TransferOut,
 	); err != nil {
-		p.logger.WithError(err).Errorf("failed to transfer %s %s from futures to spot",
-			trade.Quantity.String(), p.transferAsset)
-		if _, found := p.retryTransfers[trade.ID]; !found {
+		r.logger.WithError(err).Errorf("failed to transfer %s %s from futures to spot",
+			trade.Quantity.String(), r.transferAsset)
+		if _, found := r.retryTransfers[trade.ID]; !found {
 			bbgo.Notify(
 				fmt.Errorf("transfer failed (%s %s), retrying: %w",
 					trade.Quantity.String(),
-					p.transferAsset,
+					r.transferAsset,
 					err,
 				),
 			)
 		}
-		p.retryTransfers[trade.ID] = transferRetry{
+		r.retryTransfers[trade.ID] = transferRetry{
 			Trade:     trade,
 			LastTried: currentTime,
 		}
 		return
 	}
 	// transfer succeeded, remove from retry list if exists
-	delete(p.retryTransfers, trade.ID)
-	p.syncFuturesPosition(trade)
+	delete(r.retryTransfers, trade.ID)
+	r.syncFuturesPosition(trade)
 }
 
-func (p *ArbitrageRound) SetLogger(logger logrus.FieldLogger) {
-	p.logger = logger
+func (r *ArbitrageRound) SetLogger(logger logrus.FieldLogger) {
+	r.logger = logger
 }
 
-func (p *ArbitrageRound) SpotSymbol() string {
-	return p.spotWorker.Symbol()
+func (r *ArbitrageRound) SpotSymbol() string {
+	return r.spotWorker.Symbol()
 }
 
-func (p *ArbitrageRound) FuturesSymbol() string {
-	return p.futuresWorker.Symbol()
+func (r *ArbitrageRound) FuturesSymbol() string {
+	return r.futuresWorker.Symbol()
 }
 
-func (p *ArbitrageRound) FuturesTargetPosition() fixedpoint.Value {
-	return p.spotWorker.FilledQuantity().Neg()
+func (r *ArbitrageRound) FuturesTargetPosition() fixedpoint.Value {
+	return r.spotWorker.FilledQuantity().Neg()
 }
 
-func (p *ArbitrageRound) GetState() RoundState {
-	return p.state
+func (r *ArbitrageRound) GetState() RoundState {
+	return r.state
 }
 
-func (p *ArbitrageRound) SetClosing() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (r *ArbitrageRound) SetClosing() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	p.state = RoundClosing
+	r.state = RoundClosing
 }
 
-func (p *ArbitrageRound) AnnualizedRate() fixedpoint.Value {
-	return AnnualizedRate(p.fundingRate, p.fundingIntervalHours)
+func (r *ArbitrageRound) AnnualizedRate() fixedpoint.Value {
+	return AnnualizedRate(r.triggeredFundingRate, r.fundingIntervalHours)
 }
 
-func (p *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBook, futuresOrderBook types.OrderBook) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBook, futuresOrderBook types.OrderBook) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	defer func() {
 		// the state is PositionOpening
 		// check if the spot and futures positions are fully filled -> PositionReady
-		if p.state == RoundOpening {
-			targetPosition := p.spotWorker.TargetPosition()
-			spotDiff := targetPosition.Sub(p.spotWorker.FilledQuantity())
-			futuresDiff := targetPosition.Neg().Sub(p.futuresWorker.FilledQuantity())
+		if r.state == RoundOpening {
+			targetPosition := r.spotWorker.TargetPosition()
+			spotDiff := targetPosition.Sub(r.spotWorker.FilledQuantity())
+			futuresDiff := targetPosition.Neg().Sub(r.futuresWorker.FilledQuantity())
 			if spotDiff.IsZero() && futuresDiff.IsZero() {
-				p.state = RoundReady
+				r.state = RoundReady
 				return
 			}
 		}
 
 		// the state is PositionClosing
 		// check if the spot and futures positions are fully closed -> PositionClosed
-		if p.state == RoundClosing {
-			if p.spotWorker.FilledQuantity().IsZero() && p.futuresWorker.FilledQuantity().IsZero() {
-				p.state = RoundClosed
-				p.logger.Infof("positions closed, arbitrage round completed: %s", p.spotWorker.Symbol())
+		if r.state == RoundClosing {
+			if r.spotWorker.FilledQuantity().IsZero() && r.futuresWorker.FilledQuantity().IsZero() {
+				r.state = RoundClosed
+				r.logger.Infof("positions closed, arbitrage round completed: %s", r.spotWorker.Symbol())
 			}
 			return
 		}
 	}()
 
-	if p.state == RoundPending {
+	if r.state == RoundPending {
 		// not started yet, do nothing
 		return
 	}
 
-	if p.logger == nil {
-		p.logger = logrus.WithFields(logrus.Fields{
+	if r.logger == nil {
+		r.logger = logrus.WithFields(logrus.Fields{
 			"component": "ArbitrageRound",
-			"symbol":    p.spotWorker.Symbol(),
+			"symbol":    r.spotWorker.Symbol(),
 		})
 	}
 
-	if p.state == RoundClosed || p.state == RoundReady {
+	if r.state == RoundClosed || r.state == RoundReady {
 		return
 	}
 
-	p.retryTransferTickC <- currentTime
+	r.retryTransferTickC <- currentTime
 
 	// it's opening or closing, tick the workers
-	p.spotWorker.Tick(currentTime, spotOrderBook)
-	p.futuresWorker.Tick(currentTime, futuresOrderBook)
+	r.spotWorker.Tick(currentTime, spotOrderBook)
+	r.futuresWorker.Tick(currentTime, futuresOrderBook)
 }
 
-func (p *ArbitrageRound) syncFuturesPosition(trade types.Trade) {
-	futureTargetPosition := p.futuresWorker.TargetPosition()
-	if p.spotWorker.TargetPosition().Sign() > 0 {
+func (r *ArbitrageRound) syncFuturesPosition(trade types.Trade) {
+	futureTargetPosition := r.futuresWorker.TargetPosition()
+	if r.spotWorker.TargetPosition().Sign() > 0 {
 		futureTargetPosition = futureTargetPosition.Sub(trade.Quantity)
 	} else {
 		futureTargetPosition = futureTargetPosition.Add(trade.Quantity)
 	}
-	p.logger.Infof("syncing futures position to %s", futureTargetPosition)
-	p.futuresWorker.SetTargetPosition(futureTargetPosition)
+	r.logger.Infof("syncing futures position to %s", futureTargetPosition)
+	r.futuresWorker.SetTargetPosition(futureTargetPosition)
 }
