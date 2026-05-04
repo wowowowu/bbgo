@@ -667,30 +667,3 @@ func TestTWAPOrderExecutor_GetOrder(t *testing.T) {
 	_, found = executor.GetOrder(99999)
 	assert.False(t, found)
 }
-
-func TestTWAPOrderExecutor_Trades(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	config := TWAPWorkerConfig{}
-	executor, _, _ := testExecutorSetup(t, ctrl, config)
-
-	// Add orders to ordersMap
-	order1 := types.Order{OrderID: 1}
-	order2 := types.Order{OrderID: 2}
-	executor.ordersMap[order1] = struct{}{}
-	executor.ordersMap[order2] = struct{}{}
-
-	// Add trades to trade store
-	trade1 := types.Trade{ID: 100, OrderID: 1}
-	trade2 := types.Trade{ID: 101, OrderID: 2}
-	executor.executor.TradeCollector().TradeStore().Add(trade1)
-	executor.executor.TradeCollector().TradeStore().Add(trade2)
-
-	// Get trades
-	trades := executor.Trades()
-	// Trades are collected from ordersMap keys
-	// Note: The actual trades depend on how TradeStore.GetOrderTrades works
-	// For now, we just verify Trades() doesn't panic
-	_ = trades
-}

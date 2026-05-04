@@ -27,6 +27,10 @@ func init() {
 type Strategy struct {
 	Environment *bbgo.Environment
 
+	// strategy mutex
+	// lock before update the strategy state, such as current round, selected market, etc
+	mu sync.Mutex
+
 	// Session configuration
 	SpotSession    string `json:"spotSession"`
 	FuturesSession string `json:"futuresSession"`
@@ -38,23 +42,26 @@ type Strategy struct {
 	// TickSymbol is the symbol used for ticking the strategy, default to the first candidate symbol
 	TickSymbol string `json:"tickSymbol"`
 
+	TWAPWorkerConfig TWAPWorkerConfig `json:"twap"`
+
 	// Market selection criteria
 	MarketSelectionConfig *MarketSelectionConfig `json:"marketSelection,omitempty"`
 
 	CheckInterval       time.Duration `json:"checkInterval"`
 	ClosePositionOnExit bool          `json:"closePositionOnExit"`
 
+	spotSession, futuresSession *bbgo.ExchangeSession
+
+	// stream order books to keep track of the latest order book for the candidate symbols
 	futuresOrderBooks, spotOrderBooks map[string]*types.StreamOrderBook
-	spotMarkets, futuresMarkets       types.MarketMap
-	spotSession, futuresSession       *bbgo.ExchangeSession
-	candidateSymbols                  []string
-	costEstimator                     *CostEstimator
-	preliminaryMarketSelector         *MarketSelector
+
+	candidateSymbols          []string
+	costEstimator             *CostEstimator
+	preliminaryMarketSelector *MarketSelector
+
+	activeRounds map[string]*ArbitrageRound
 
 	coinmarketcapClient *coinmarketcap.DataSource
-	mu                  sync.Mutex
-	checkRoundStartTime time.Time
-	currentTime         time.Time
 
 	// persist the positions
 	// the positions are shared across rounds and the executors of the same symbol.
@@ -180,17 +187,6 @@ func (s *Strategy) CrossRun(
 		return fmt.Errorf("futures session exchange does not support order query service: %s", s.futuresSession.ExchangeName)
 	}
 
-	spotMarkets, err := s.spotSession.Exchange.QueryMarkets(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to query spot markets: %w", err)
-	}
-	s.spotMarkets = spotMarkets
-	futuresMarkets, err := s.futuresSession.Exchange.QueryMarkets(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to query futures markets: %w", err)
-	}
-	s.futuresMarkets = futuresMarkets
-
 	// initialize cost estimator
 	s.costEstimator = NewCostEstimator()
 	s.costEstimator.
@@ -216,6 +212,9 @@ func (s *Strategy) CrossRun(
 		return errors.New("no candidate symbols after filtering")
 	}
 
+	// setup the general order executors
+	// NOTE: the executors should be created first before anything else to ensure the executors get updated first.
+	// The twap executors rely on the state of the general order executors to determine the filled quantity.
 	s.candidateSymbols = candidateSymbols
 	for _, symbol := range candidateSymbols {
 		spotMarket, found := s.spotSession.Market(symbol)
@@ -264,7 +263,10 @@ func (s *Strategy) CrossRun(
 	// subscribe BNB pairs for trading fee calculation
 	quoteCurrencies := make(map[string]struct{})
 	for _, symbol := range candidateSymbols {
-		market := s.futuresMarkets[symbol]
+		market, ok := s.futuresSession.Market(symbol)
+		if !ok {
+			return fmt.Errorf("market %s not found in futures session", symbol)
+		}
 		quoteCurrencies[market.QuoteCurrency] = struct{}{}
 	}
 	for quoteCurrency := range quoteCurrencies {
@@ -274,6 +276,7 @@ func (s *Strategy) CrossRun(
 	}
 
 	// initialize depth books for model selection
+	// we create new stream here to save the bandwidth of the market data stream of the sessions
 	futureStream := s.futuresSession.Exchange.NewStream()
 	futureStream.SetPublicOnly()
 	spotStream := s.spotSession.Exchange.NewStream()
@@ -308,6 +311,16 @@ func (s *Strategy) CrossRun(
 		}))
 	}
 
+	s.spotSession.UserDataStream.OnTradeUpdate(func(trade types.Trade) {
+		// lock the strategy to ensure all the updates to the active rounds are seen
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if round, found := s.activeRounds[trade.Symbol]; found {
+			round.HandleSpotTrade(trade, trade.Time.Time())
+		}
+	})
+
 	// Register shutdown handler to persist state
 	bbgo.OnShutdown(ctx, func(ctx context.Context, wg *sync.WaitGroup) {
 		defer wg.Done()
@@ -320,32 +333,46 @@ func (s *Strategy) CrossRun(
 }
 
 func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
+	// lock the strategy to ensure all the updates to the active rounds are seen
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.checkRoundStartTime.IsZero() || s.currentTime.IsZero() {
-		s.checkRoundStartTime = tickTime
-		s.currentTime = tickTime
-		return
-	}
-	// from now on, s.checkRoundStartTime and s.currentTime are not zero
-
-	// skip tick that's before current time
-	if tickTime.Before(s.currentTime) {
-		return
-	}
-	s.currentTime = tickTime
-
-	// check if it's time to check for new round
-	if s.currentTime.Sub(s.checkRoundStartTime) < s.CheckInterval {
-		return
-	}
-
 	// start processing
-	s.process(ctx)
+	// 1. check if there is any active round needs to be closed
+	// remove closed active rounds
+	for symbol, round := range s.activeRounds {
+		if round.GetState() == RoundClosed {
+			s.logger.Infof("removing closed round for symbol %s", symbol)
+			delete(s.activeRounds, symbol)
+		}
+	}
+	// TODO: check if existing active rounds need to be marked as closing
 
-	// check interval done, reset and start new check interval
-	s.checkRoundStartTime = s.currentTime
+	// 2. check if new round can be opened or existing round needs to be adjusted
+	candidates, err := s.preliminaryMarketSelector.SelectMarkets(ctx, s.candidateSymbols)
+	if err != nil {
+		s.logger.WithError(err).Error("failed to select market candidates")
+		return
+	}
+	if len(candidates) == 0 {
+		// no candidates, nothing to do in this round
+		return
+	}
+
+	selectedCandidate, _ := s.selectMostPorfitableMarket(candidates)
+	if selectedCandidate == nil {
+		// no profitable candidate found, nothing to do in this round
+		return
+	}
+	// TODO: implement round opening logic with the selected candidate
+
+	// tick existing active rounds
+	for _, round := range s.activeRounds {
+		spotOrderBook := s.spotOrderBooks[round.spotWorker.Symbol()].Copy()
+		futuresOrderBook := s.futuresOrderBooks[round.futuresWorker.Symbol()].Copy()
+		round.Tick(tickTime, spotOrderBook, futuresOrderBook)
+	}
+
 }
 
 // static market filters
@@ -359,7 +386,7 @@ func (s *Strategy) filterMarketByCapSize(ctx context.Context, symbols []string) 
 	}
 	var candidateSymbols []string
 	for _, symbol := range symbols {
-		market, ok := s.futuresMarkets[symbol]
+		market, ok := s.futuresSession.Market(symbol)
 		if !ok {
 			continue
 		}
@@ -373,8 +400,8 @@ func (s *Strategy) filterMarketByCapSize(ctx context.Context, symbols []string) 
 func (s *Strategy) filterMarketBothListed(symbols []string) []string {
 	var candidateSymbols []string
 	for _, symbol := range symbols {
-		_, spotOk := s.spotMarkets[symbol]
-		_, futuresOk := s.futuresMarkets[symbol]
+		_, spotOk := s.spotSession.Market(symbol)
+		_, futuresOk := s.futuresSession.Market(symbol)
 		if spotOk && futuresOk {
 			candidateSymbols = append(candidateSymbols, symbol)
 		} else {
@@ -387,7 +414,7 @@ func (s *Strategy) filterMarketBothListed(symbols []string) []string {
 func (s *Strategy) filterMarketCollateralRate(ctx context.Context, symbols []string) []string {
 	var markets []types.Market
 	for _, symbol := range symbols {
-		market, ok := s.futuresMarkets[symbol]
+		market, ok := s.futuresSession.Market(symbol)
 		if !ok {
 			continue
 		}
@@ -417,29 +444,6 @@ func (s *Strategy) filterMarketCollateralRate(ctx context.Context, symbols []str
 	return candidateSymbols
 }
 
-func (s *Strategy) process(ctx context.Context) {
-	// 1. check if there is any active round needs to be closed
-	// TODO: implement round management and closing logic
-
-	// 2. check if new round can be opened or existing round needs to be adjusted
-	candidates, err := s.preliminaryMarketSelector.SelectMarkets(ctx, s.candidateSymbols)
-	if err != nil {
-		s.logger.WithError(err).Error("failed to select market candidates")
-		return
-	}
-	if len(candidates) == 0 {
-		// no candidates, nothing to do in this round
-		return
-	}
-
-	selectedCandidate, _ := s.selectMostPorfitableMarket(candidates)
-	if selectedCandidate == nil {
-		// no profitable candidate found, nothing to do in this round
-		return
-	}
-	// TODO: implement round opening logic with the selected candidate
-}
-
 // selectMostProfitableMarket selects the most profitable market among the candidates based on the estimated break-even holding intervals
 // it will also return the target position for the futures trade
 // the most profitable market is the one with the shortest break-even holding intervals
@@ -451,7 +455,10 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) (*Ma
 	breakevenIntervals := make(map[string]fixedpoint.Value)
 	targetPositions := make(map[string]fixedpoint.Value)
 	for _, candidate := range candidates {
-		spotMarket := s.spotMarkets[candidate.Symbol]
+		spotMarket, ok := s.spotSession.Market(candidate.Symbol)
+		if !ok {
+			continue
+		}
 		if s.MarketSelectionConfig.FuturesDirection == types.PositionShort {
 			// long spot -> find the amount for the quote currency
 			quoteBalance, ok := spotAccount.Balance(spotMarket.QuoteCurrency)

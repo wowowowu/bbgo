@@ -50,7 +50,6 @@ type TWAPWorkerConfig struct {
 	NumOfTicks int `json:"numOfTicks,omitempty"`
 }
 
-//go:generate callbackgen -type=TWAPWorker -output=twap_callbacks.go
 type TWAPWorker struct {
 	// sync.Mutex protects fields mutated by the background trade goroutine:
 	// filledQuantity, activeOrder, trades, state
@@ -74,13 +73,10 @@ type TWAPWorker struct {
 	symbol   string
 	position *types.Position
 
-	ctx       context.Context
-	ctxCancel context.CancelFunc
+	ctx context.Context
 
 	activeOrder  *types.Order
 	twapExecutor *TWAPExecutor
-
-	tradeCallbacks []func(trade types.Trade)
 
 	logger logrus.FieldLogger
 }
@@ -108,7 +104,7 @@ func NewTWAPWorker(
 		targetPosition: fixedpoint.Zero,
 		side:           types.SideTypeNone,
 	}
-	w.ctx, w.ctxCancel = context.WithCancel(ctx)
+	w.ctx = ctx
 	w.twapExecutor = NewTWAPOrderExecutor(
 		w.ctx,
 		service,
@@ -132,6 +128,14 @@ func (w *TWAPWorker) SetTargetPosition(targetPosition fixedpoint.Value) {
 
 func (w *TWAPWorker) SetLogger(logger logrus.FieldLogger) {
 	w.logger = logger
+}
+
+func (w *TWAPWorker) Symbol() string {
+	return w.symbol
+}
+
+func (w *TWAPWorker) Market() types.Market {
+	return w.twapExecutor.market
 }
 
 func (w *TWAPWorker) State() TWAPWorkerState {
@@ -167,10 +171,6 @@ func (w *TWAPWorker) ActiveOrder() *types.Order {
 	defer w.mu.Unlock()
 
 	return w.activeOrder
-}
-
-func (w *TWAPWorker) Trades() []types.Trade {
-	return w.twapExecutor.Trades()
 }
 
 func (w *TWAPWorker) TotalFee() map[string]fixedpoint.Value {
@@ -285,8 +285,6 @@ func (w *TWAPWorker) Stop() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	defer w.ctxCancel()
-
 	if w.state == TWAPWorkerStateRunning || w.state == TWAPWorkerStatePending {
 		if w.activeOrder != nil {
 			err := w.twapExecutor.CancelOrder(w.ctx, *w.activeOrder)
@@ -296,7 +294,9 @@ func (w *TWAPWorker) Stop() {
 		}
 
 		// stop executor
-		w.twapExecutor.Stop()
+		if err := w.twapExecutor.Stop(); err != nil {
+			w.logger.WithError(err).Warn("[TWAP Stop] failed to stop TWAP executor")
+		}
 
 		w.state = TWAPWorkerStateDone
 		w.activeOrder = nil

@@ -100,15 +100,6 @@ func (o *TWAPExecutor) SyncOrder(order types.Order) error {
 	return nil
 }
 
-func (o *TWAPExecutor) Trades() []types.Trade {
-	var trades []types.Trade
-	for order := range o.ordersMap {
-		ts := o.executor.TradeCollector().TradeStore().GetOrderTrades(order)
-		trades = append(trades, ts...)
-	}
-	return trades
-}
-
 func (o *TWAPExecutor) GetOrder(orderID uint64) (types.Order, bool) {
 	return o.executor.OrderStore().Get(orderID)
 }
