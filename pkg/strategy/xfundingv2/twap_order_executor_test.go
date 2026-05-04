@@ -656,6 +656,7 @@ func TestTWAPOrderExecutor_GetOrder(t *testing.T) {
 			Symbol: "BTCUSDT",
 		},
 	}
+	executor.ordersMap[order.OrderID] = struct{}{} // Add to ordersMap to simulate tracking
 	executor.executor.OrderStore().Add(order)
 
 	// Test GetOrder

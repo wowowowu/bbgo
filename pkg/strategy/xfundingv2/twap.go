@@ -138,6 +138,10 @@ func (w *TWAPWorker) Market() types.Market {
 	return w.twapExecutor.market
 }
 
+func (w *TWAPWorker) Executor() *TWAPExecutor {
+	return w.twapExecutor
+}
+
 func (w *TWAPWorker) State() TWAPWorkerState {
 	w.mu.Lock()
 	defer w.mu.Unlock()

@@ -103,6 +103,40 @@ func (r *ArbitrageRound) SyncFundingFeeRecords(ctx context.Context, currentTime 
 	r.syncFundingFeeRecords(ctx, currentTime)
 }
 
+func (r *ArbitrageRound) Orders() map[string][]types.Order {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	orders := map[string][]types.Order{
+		"spot":    r.spotWorker.Executor().AllOrders(),
+		"futures": r.futuresWorker.Executor().AllOrders(),
+	}
+
+	return orders
+}
+
+func (r *ArbitrageRound) Trades() map[string][]types.Trade {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	trades := map[string][]types.Trade{
+		"spot":    r.spotWorker.Executor().AllTrades(),
+		"futures": r.futuresWorker.Executor().AllTrades(),
+	}
+
+	return trades
+}
+
+func (r *ArbitrageRound) HasOrder(orderID uint64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	_, spotExists := r.spotWorker.Executor().GetOrder(orderID)
+	_, futuresExists := r.futuresWorker.Executor().GetOrder(orderID)
+
+	return spotExists || futuresExists
+}
+
 func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime time.Time) {
 	if r.startTime.IsZero() || r.startTime.After(currentTime) {
 		return

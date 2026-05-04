@@ -83,7 +83,7 @@ func (s *Strategy) ID() string {
 
 func (s *Strategy) InstanceID() string {
 	symbols := strings.Join(s.CandidateSymbols, "_")
-	return fmt.Sprintf("%s-%s", ID, symbols)
+	return fmt.Sprintf("%s-%s-%s-futures", ID, symbols, s.MarketSelectionConfig.FuturesDirection)
 }
 
 func (s *Strategy) Defaults() error {
@@ -316,8 +316,10 @@ func (s *Strategy) CrossRun(
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		if round, found := s.activeRounds[trade.Symbol]; found {
-			round.HandleSpotTrade(trade, trade.Time.Time())
+		for _, round := range s.activeRounds {
+			if round.HasOrder(trade.OrderID) {
+				round.HandleSpotTrade(trade, trade.Time.Time())
+			}
 		}
 	})
 
