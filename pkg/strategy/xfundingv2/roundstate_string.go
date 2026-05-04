@@ -8,15 +8,16 @@ func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
-	_ = x[PositionOpening-0]
-	_ = x[PositionReady-1]
-	_ = x[PositionClosing-2]
-	_ = x[PositionClosed-3]
+	_ = x[RoundPending-0]
+	_ = x[RoundOpening-1]
+	_ = x[RoundReady-2]
+	_ = x[RoundClosing-3]
+	_ = x[RoundClosed-4]
 }
 
-const _RoundState_name = "PositionOpeningPositionReadyPositionClosingPositionClosed"
+const _RoundState_name = "RoundPendingRoundOpeningRoundReadyRoundClosingRoundClosed"
 
-var _RoundState_index = [...]uint8{0, 15, 28, 43, 57}
+var _RoundState_index = [...]uint8{0, 12, 24, 34, 46, 57}
 
 func (i RoundState) String() string {
 	if i < 0 || i >= RoundState(len(_RoundState_index)-1) {

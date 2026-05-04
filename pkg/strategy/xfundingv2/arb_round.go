@@ -17,10 +17,11 @@ import (
 type RoundState int
 
 const (
-	PositionOpening RoundState = iota
-	PositionReady
-	PositionClosing
-	PositionClosed
+	RoundPending RoundState = iota
+	RoundOpening
+	RoundReady
+	RoundClosing
+	RoundClosed
 )
 
 type FuturesTransfer interface {
@@ -66,7 +67,7 @@ func NewArbitrageRound(
 		futuresWorker:        futuresTwap,
 		futuresTransfer:      futuresTransfer,
 		transferAsset:        spotTwap.Market().BaseCurrency,
-		state:                PositionOpening,
+		state:                RoundPending,
 		retryTransfers:       make(map[uint64]transferRetry),
 		retryTransferTickC:   make(chan time.Time, 1),
 	}
@@ -94,9 +95,16 @@ func (p *ArbitrageRound) CollectedFunding(currentTime time.Time) fixedpoint.Valu
 }
 
 func (p *ArbitrageRound) Start(ctx context.Context, currentTime time.Time) {
-	p.spotWorker.Start(ctx, currentTime)
-	p.futuresWorker.Start(ctx, currentTime)
-	go p.retryTransferWorker(ctx)
+	if p.startTime.IsZero() {
+		p.spotWorker.Start(ctx, currentTime)
+		p.futuresWorker.Start(ctx, currentTime)
+
+		go p.retryTransferWorker(ctx)
+
+		p.startTime = currentTime
+		p.state = RoundOpening
+	}
+
 }
 
 func (p *ArbitrageRound) Stop() {
@@ -193,6 +201,13 @@ func (p *ArbitrageRound) GetState() RoundState {
 	return p.state
 }
 
+func (p *ArbitrageRound) SetClosing() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.state = RoundClosing
+}
+
 func (p *ArbitrageRound) AnnualizedRate() fixedpoint.Value {
 	return AnnualizedRate(p.fundingRate, p.fundingIntervalHours)
 }
@@ -204,29 +219,30 @@ func (p *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 	defer func() {
 		// the state is PositionOpening
 		// check if the spot and futures positions are fully filled -> PositionReady
-		if p.state == PositionOpening {
+		if p.state == RoundOpening {
 			targetPosition := p.spotWorker.TargetPosition()
 			spotDiff := targetPosition.Sub(p.spotWorker.FilledQuantity())
 			futuresDiff := targetPosition.Neg().Sub(p.futuresWorker.FilledQuantity())
 			if spotDiff.IsZero() && futuresDiff.IsZero() {
-				p.state = PositionReady
+				p.state = RoundReady
 				return
 			}
 		}
 
 		// the state is PositionClosing
 		// check if the spot and futures positions are fully closed -> PositionClosed
-		if p.state == PositionClosing {
+		if p.state == RoundClosing {
 			if p.spotWorker.FilledQuantity().IsZero() && p.futuresWorker.FilledQuantity().IsZero() {
-				p.state = PositionClosed
+				p.state = RoundClosed
 				p.logger.Infof("positions closed, arbitrage round completed: %s", p.spotWorker.Symbol())
 			}
 			return
 		}
 	}()
 
-	if p.startTime.IsZero() {
-		p.startTime = currentTime
+	if p.state == RoundPending {
+		// not started yet, do nothing
+		return
 	}
 
 	if p.logger == nil {
@@ -236,7 +252,7 @@ func (p *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 		})
 	}
 
-	if p.state == PositionClosed || p.state == PositionReady {
+	if p.state == RoundClosed || p.state == RoundReady {
 		return
 	}
 

@@ -341,7 +341,7 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 	// 1. check if there is any active round needs to be closed
 	// remove closed active rounds
 	for symbol, round := range s.activeRounds {
-		if round.GetState() == PositionClosed {
+		if round.GetState() == RoundClosed {
 			s.logger.Infof("removing closed round for symbol %s", symbol)
 			delete(s.activeRounds, symbol)
 		}
