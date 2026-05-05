@@ -286,13 +286,13 @@ func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Tim
 		return
 	}
 
-	// try to transfer asset from futures to spot.
+	// try to transfer asset from spot to futures.
 	// if transfer fails, retry in the next tick until it succeeds
 	if err := r.futuresService.TransferFuturesAccountAsset(
-		r.spotWorker.ctx, r.asset, trade.Quantity, types.TransferOut,
+		r.spotWorker.ctx, r.asset, trade.Quantity, types.TransferIn,
 	); err != nil {
 		r.logger.WithError(err).Errorf("failed to transfer %s %s from futures to spot",
-			trade.Quantity.String(), r.asset)
+			trade.Quantity, r.asset)
 		if _, found := r.retryTransfers[trade.ID]; !found {
 			bbgo.Notify(
 				fmt.Errorf("transfer failed (%s %s), retrying: %w",
