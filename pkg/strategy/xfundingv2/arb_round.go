@@ -71,6 +71,14 @@ type ArbitrageRound struct {
 func NewArbitrageRound(
 	fundingRate fixedpoint.Value, minHoldingIntervals, fundingIntervalHours int,
 	spotTwap, futuresTwap *TWAPWorker, futuresService FuturesService) *ArbitrageRound {
+	var asset string
+	if spotTwap.TargetPosition().Sign() > 0 {
+		// long spot, short futures -> collateral is base asset
+		asset = spotTwap.Market().BaseCurrency
+	} else {
+		// short spot, long futures -> collateral is quote asset
+		asset = spotTwap.Market().QuoteCurrency
+	}
 	return &ArbitrageRound{
 		triggeredFundingRate: fundingRate,
 		minHoldingIntervals:  minHoldingIntervals,
@@ -78,7 +86,7 @@ func NewArbitrageRound(
 		spotWorker:           spotTwap,
 		futuresWorker:        futuresTwap,
 		futuresService:       futuresService,
-		asset:                spotTwap.Market().BaseCurrency,
+		asset:                asset,
 		state:                RoundPending,
 		retryTransfers:       make(map[uint64]transferRetry),
 		retryTransferTickC:   make(chan time.Time, 1),

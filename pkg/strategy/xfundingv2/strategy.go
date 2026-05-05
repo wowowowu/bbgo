@@ -362,10 +362,9 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 	}
 
 	// remove closed active rounds
-	for symbol, round := range s.activeRounds {
+	for _, round := range s.activeRounds {
 		if round.State() == RoundClosed {
-			s.logger.Infof("removing closed round: %s", round)
-			delete(s.activeRounds, symbol)
+			s.handleRoundExit(ctx, round)
 		}
 		// TODO: insert closed round records into database
 	}
@@ -688,4 +687,31 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 	}
 	breakEvenIntervals := totalCost.Div(estimateFundingFeePerInterval).Round(0, fixedpoint.Up)
 	return breakEvenIntervals, nil
+}
+
+func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound) {
+	var asset string
+	switch s.MarketSelectionConfig.FuturesDirection {
+	case types.PositionShort:
+		// short futures -> transfer base currency
+		asset = round.futuresWorker.Market().BaseCurrency
+	case types.PositionLong:
+		// long futures -> transfer quote currency
+		asset = round.futuresWorker.Market().QuoteCurrency
+	}
+	account := s.futuresSession.GetAccount()
+	balance, ok := account.Balance(asset)
+	if !ok {
+		s.logger.Warnf("balance not found for asset %s when handling round exit: %s", asset, round)
+	} else if balance.Available.Sign() > 0 {
+		// transfer the remaining balance back to spot account if there is any
+		if err := s.futuresService.TransferFuturesAccountAsset(ctx, asset, balance.Available, types.TransferOut); err != nil {
+			s.logger.WithError(err).Errorf("failed to transfer %s during round exit: %s", asset, round)
+		} else {
+			s.logger.Infof("transferred out %s during round exit: %s", asset, round)
+		}
+	}
+
+	s.logger.Infof("removing closed round: %s", round)
+	delete(s.activeRounds, round.SpotSymbol())
 }
