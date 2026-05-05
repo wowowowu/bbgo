@@ -30,6 +30,7 @@ type FuturesService interface {
 	batch.BinanceFuturesIncomeHistoryService
 
 	TransferFuturesAccountAsset(ctx context.Context, asset string, amount fixedpoint.Value, io types.TransferDirection) error
+	QueryPremiumIndex(ctx context.Context, symbol string) (*types.PremiumIndex, error)
 }
 
 type transferRetry struct {
@@ -41,6 +42,7 @@ type ArbitrageRound struct {
 	mu sync.Mutex
 
 	triggeredFundingRate fixedpoint.Value
+	minHoldingIntervals  int
 	fundingIntervalHours int
 
 	// TWAP workers
@@ -59,14 +61,19 @@ type ArbitrageRound struct {
 
 	logger logrus.FieldLogger
 
+	// startTime is the time when the round is started
 	startTime time.Time
+	// closingTime is the time when the round is entered closing state
+	closingTime     time.Time
+	closingDuration time.Duration
 }
 
 func NewArbitrageRound(
-	fundingRate fixedpoint.Value, fundingIntervalHours int,
+	fundingRate fixedpoint.Value, minHoldingIntervals, fundingIntervalHours int,
 	spotTwap, futuresTwap *TWAPWorker, futuresService FuturesService) *ArbitrageRound {
 	return &ArbitrageRound{
 		triggeredFundingRate: fundingRate,
+		minHoldingIntervals:  minHoldingIntervals,
 		fundingIntervalHours: fundingIntervalHours,
 		spotWorker:           spotTwap,
 		futuresWorker:        futuresTwap,
@@ -77,6 +84,43 @@ func NewArbitrageRound(
 		retryTransferTickC:   make(chan time.Time, 1),
 		fundingFeeRecords:    make(map[int64]FundingFee),
 	}
+}
+
+func (r *ArbitrageRound) StartTime() time.Time {
+	return r.startTime
+}
+
+func (r *ArbitrageRound) IsClosable(currentTime time.Time) bool {
+	if r.startTime.IsZero() {
+		return false
+	}
+	intervalDuration := time.Duration(r.fundingIntervalHours) * time.Hour
+	intervalStart := r.startTime.Truncate(intervalDuration)
+	lastIntervalEnd := currentTime.Truncate(intervalDuration)
+	numIntervalPassed := int(lastIntervalEnd.Sub(intervalStart) / intervalDuration)
+	return numIntervalPassed > r.minHoldingIntervals
+}
+
+func (r *ArbitrageRound) String() string {
+	if r.state != RoundClosing {
+		return fmt.Sprintf(
+			"ArbitrageRound(symbol=%s, state=%s, spot=%s, futures=%s, startTime=%s)",
+			r.spotWorker.Symbol(),
+			r.state,
+			r.spotWorker.FilledQuantity(),
+			r.futuresWorker.FilledQuantity(),
+			r.startTime.Format(time.RFC3339),
+		)
+	}
+	return fmt.Sprintf(
+		"ArbitrageRound(symbol=%s, state=%s, spot=%s, futures=%s, closingTime=%s, expectedCloseTime=%s)",
+		r.spotWorker.Symbol(),
+		r.state,
+		r.spotWorker.FilledQuantity(),
+		r.futuresWorker.FilledQuantity(),
+		r.closingTime.Format(time.RFC3339),
+		r.closingTime.Add(r.closingDuration).Format(time.RFC3339),
+	)
 }
 
 func (r *ArbitrageRound) CollectedFunding(ctx context.Context, currentTime time.Time) fixedpoint.Value {
@@ -178,17 +222,21 @@ func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime 
 	}
 }
 
-func (r *ArbitrageRound) Start(ctx context.Context, currentTime time.Time) {
+func (r *ArbitrageRound) Start(ctx context.Context, currentTime time.Time) error {
 	if r.startTime.IsZero() {
-		r.spotWorker.Start(ctx, currentTime)
-		r.futuresWorker.Start(ctx, currentTime)
+		if err := r.spotWorker.Start(ctx, currentTime); err != nil {
+			return fmt.Errorf("failed to start spot worker: %w", err)
+		}
+		if err := r.futuresWorker.Start(ctx, currentTime); err != nil {
+			return fmt.Errorf("failed to start futures worker: %w", err)
+		}
 
 		go r.retryTransferWorker(ctx)
 
 		r.startTime = currentTime
 		r.state = RoundOpening
 	}
-
+	return nil
 }
 
 func (r *ArbitrageRound) Stop() {
@@ -281,15 +329,22 @@ func (r *ArbitrageRound) FuturesTargetPosition() fixedpoint.Value {
 	return r.spotWorker.FilledQuantity().Neg()
 }
 
-func (r *ArbitrageRound) GetState() RoundState {
+func (r *ArbitrageRound) State() RoundState {
 	return r.state
 }
 
-func (r *ArbitrageRound) SetClosing() {
+func (r *ArbitrageRound) SetClosing(currentTime time.Time, duration time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.spotWorker.SetTargetPosition(fixedpoint.Zero)
+	r.spotWorker.ResetTime(currentTime, duration)
+	r.futuresWorker.SetTargetPosition(fixedpoint.Zero)
+	r.futuresWorker.ResetTime(currentTime, duration)
+
 	r.state = RoundClosing
+	r.closingTime = currentTime
+	r.closingDuration = duration
 }
 
 func (r *ArbitrageRound) AnnualizedRate() fixedpoint.Value {
