@@ -167,7 +167,6 @@ func (s *Strategy) CrossSubscribe(sessions map[string]*bbgo.ExchangeSession) {
 
 	for _, sess := range []*bbgo.ExchangeSession{spotSession, futuresSession} {
 		sess.Subscribe(types.KLineChannel, s.TickSymbol, types.SubscribeOptions{Interval: types.Interval1m})
-		sess.Subscribe(types.MarketTradeChannel, s.TickSymbol, types.SubscribeOptions{})
 	}
 }
 
@@ -318,9 +317,6 @@ func (s *Strategy) CrossRun(
 	s.preliminaryMarketSelector = NewMarketSelector(*s.MarketSelectionConfig, binanceEx, s.logger)
 
 	for _, sess := range []*bbgo.ExchangeSession{s.spotSession, s.futuresSession} {
-		sess.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
-			s.tick(ctx, trade.Time.Time())
-		}))
 		sess.MarketDataStream.OnKLineClosed(types.KLineWith(s.TickSymbol, types.Interval1m, func(kline types.KLine) {
 			s.tick(ctx, kline.EndTime.Time())
 		}))
