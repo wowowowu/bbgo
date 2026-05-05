@@ -696,6 +696,10 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 }
 
 func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound) {
+	// stop the round
+	round.Stop()
+
+	// transfer asset back to spot account
 	var asset string
 	switch s.MarketSelectionConfig.FuturesDirection {
 	case types.PositionShort:
