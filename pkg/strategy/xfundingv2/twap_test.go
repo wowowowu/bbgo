@@ -106,7 +106,7 @@ func TestTWAPWorker_FillingOrders(t *testing.T) {
 		// Target position: buy 5 BTC total
 		targetPosition := Number(5.0)
 		worker.SetTargetPosition(targetPosition)
-		assert.Equal(t, types.SideTypeBuy, worker.side)
+		assert.Equal(t, types.SideTypeBuy, orderSide(worker.remainingQuantity()))
 
 		ctx := context.Background()
 		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
@@ -175,14 +175,14 @@ func TestTWAPWorker_FillingOrders(t *testing.T) {
 			filledQty = filledQty.Add(expectedSliceQty)
 
 			// Verify cumulative filled quantity after each slice
-			assert.Equal(t, filledQty, worker.FilledQuantity(),
+			assert.Equal(t, filledQty, worker.FilledPosition(),
 				"slice %d: cumulative filled quantity mismatch", slice)
 
 			tradeID++
 		}
 
 		// Verify all filled
-		assert.Equal(t, targetPosition, worker.FilledQuantity())
+		assert.Equal(t, targetPosition, worker.FilledPosition())
 		assert.True(t, worker.RemainingQuantity().IsZero())
 	})
 
@@ -242,7 +242,7 @@ func TestTWAPWorker_FillingOrders(t *testing.T) {
 		trade1 := makeTrade(1, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), Number(0.5))
 		processTrade(generalExecutor, trade1)
 
-		assert.Equal(t, Number(0.5), worker.FilledQuantity())
+		assert.Equal(t, Number(0.5), worker.FilledPosition())
 		assert.Equal(t, Number(2.5), worker.RemainingQuantity())
 
 		// Slice 2: remaining = 2.5, remaining_slices = 2, so sliceQty = 1.25
@@ -255,7 +255,7 @@ func TestTWAPWorker_FillingOrders(t *testing.T) {
 		trade2 := makeTrade(2, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), Number(0.75))
 		processTrade(generalExecutor, trade2)
 
-		assert.Equal(t, Number(1.25), worker.FilledQuantity())
+		assert.Equal(t, Number(1.25), worker.FilledPosition())
 		assert.Equal(t, Number(1.75), worker.RemainingQuantity())
 
 		// Slice 3: Fill remaining completely
@@ -269,7 +269,7 @@ func TestTWAPWorker_FillingOrders(t *testing.T) {
 		processTrade(generalExecutor, trade3)
 
 		// Verify all filled after carryover
-		assert.Equal(t, targetPosition, worker.FilledQuantity())
+		assert.Equal(t, targetPosition, worker.FilledPosition())
 		assert.True(t, worker.RemainingQuantity().IsZero())
 	})
 }
@@ -293,7 +293,7 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 		// Phase 1: Open long position of 2 BTC
 		targetPosition := Number(2.0)
 		worker.SetTargetPosition(targetPosition)
-		assert.Equal(t, types.SideTypeBuy, worker.side)
+		assert.Equal(t, types.SideTypeBuy, orderSide(worker.remainingQuantity()))
 
 		ctx := context.Background()
 		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
@@ -357,12 +357,12 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 		processTrade(generalExecutor, trade2)
 
 		// Verify long position opened
-		assert.Equal(t, Number(2.0), worker.FilledQuantity())
+		assert.Equal(t, Number(2.0), worker.FilledPosition())
 		assert.True(t, worker.RemainingQuantity().IsZero())
 
 		// Phase 2: Close the position (target = 0)
 		worker.SetTargetPosition(fixedpoint.Zero)
-		assert.Equal(t, types.SideTypeSell, worker.side)
+		assert.Equal(t, types.SideTypeSell, orderSide(worker.remainingQuantity()))
 
 		// Reset time for closing phase - this also clears active order state
 		closeStartTime := startTime.Add(5 * time.Minute)
@@ -382,7 +382,7 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 		trade3 := makeTrade(3, activeOrder.OrderID, types.SideTypeSell, Number(99.98), Number(1.0))
 		processTrade(generalExecutor, trade3)
 
-		assert.Equal(t, Number(1.0), worker.FilledQuantity())
+		assert.Equal(t, Number(1.0), worker.FilledPosition())
 		assert.Equal(t, Number(-1.0), worker.RemainingQuantity())
 
 		// Second close slice: sell remaining 1 BTC
@@ -395,7 +395,7 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 		processTrade(generalExecutor, trade4)
 
 		// Verify position closed
-		assert.True(t, worker.FilledQuantity().IsZero())
+		assert.True(t, worker.FilledPosition().IsZero())
 		assert.True(t, worker.RemainingQuantity().IsZero())
 	})
 
@@ -416,7 +416,7 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 		// Phase 1: Open short position of -2 BTC (sell 2 BTC)
 		targetPosition := Number(-2.0)
 		worker.SetTargetPosition(targetPosition)
-		assert.Equal(t, types.SideTypeSell, worker.side)
+		assert.Equal(t, types.SideTypeSell, orderSide(worker.remainingQuantity()))
 
 		ctx := context.Background()
 		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
@@ -480,12 +480,12 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 		processTrade(generalExecutor, trade2)
 
 		// Verify short position opened
-		assert.Equal(t, Number(-2.0), worker.FilledQuantity())
+		assert.Equal(t, Number(-2.0), worker.FilledPosition())
 		assert.True(t, worker.RemainingQuantity().IsZero())
 
 		// Phase 2: Close the position (target = 0)
 		worker.SetTargetPosition(fixedpoint.Zero)
-		assert.Equal(t, types.SideTypeBuy, worker.side)
+		assert.Equal(t, types.SideTypeBuy, orderSide(worker.remainingQuantity()))
 
 		// Reset time for closing phase
 		closeStartTime := startTime.Add(5 * time.Minute)
@@ -505,7 +505,7 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 		trade3 := makeTrade(3, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), Number(1.0))
 		processTrade(generalExecutor, trade3)
 
-		assert.Equal(t, Number(-1.0), worker.FilledQuantity())
+		assert.Equal(t, Number(-1.0), worker.FilledPosition())
 		assert.Equal(t, Number(1.0), worker.RemainingQuantity())
 
 		// Second close slice: buy remaining 1 BTC
@@ -518,7 +518,7 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 		processTrade(generalExecutor, trade4)
 
 		// Verify position closed
-		assert.True(t, worker.FilledQuantity().IsZero())
+		assert.True(t, worker.FilledPosition().IsZero())
 		assert.True(t, worker.RemainingQuantity().IsZero())
 	})
 }
@@ -578,7 +578,7 @@ func TestTWAPWorker_Deadline(t *testing.T) {
 		trade1 := makeTrade(1, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), targetPosition)
 		processTrade(generalExecutor, trade1)
 
-		assert.Equal(t, targetPosition, worker.FilledQuantity())
+		assert.Equal(t, targetPosition, worker.FilledPosition())
 		assert.True(t, worker.RemainingQuantity().IsZero())
 
 		// Tick past deadline - position is filled so no new order needed
@@ -840,7 +840,7 @@ func TestTWAPWorker_Misc(t *testing.T) {
 		})
 
 		t.Run("better sell price triggers update", func(t *testing.T) {
-			worker.side = types.SideTypeSell
+			worker.SetTargetPosition(Number(-1.0))
 			worker.activeOrder = &types.Order{
 				OrderID: 1,
 				SubmitOrder: types.SubmitOrder{

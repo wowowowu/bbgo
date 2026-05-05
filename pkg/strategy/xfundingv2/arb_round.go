@@ -107,8 +107,8 @@ func (r *ArbitrageRound) String() string {
 			"ArbitrageRound(symbol=%s, state=%s, spot=%s, futures=%s, startTime=%s)",
 			r.spotWorker.Symbol(),
 			r.state,
-			r.spotWorker.FilledQuantity(),
-			r.futuresWorker.FilledQuantity(),
+			r.spotWorker.FilledPosition(),
+			r.futuresWorker.FilledPosition(),
 			r.startTime.Format(time.RFC3339),
 		)
 	}
@@ -116,8 +116,8 @@ func (r *ArbitrageRound) String() string {
 		"ArbitrageRound(symbol=%s, state=%s, spot=%s, futures=%s, closingTime=%s, expectedCloseTime=%s)",
 		r.spotWorker.Symbol(),
 		r.state,
-		r.spotWorker.FilledQuantity(),
-		r.futuresWorker.FilledQuantity(),
+		r.spotWorker.FilledPosition(),
+		r.futuresWorker.FilledPosition(),
 		r.closingTime.Format(time.RFC3339),
 		r.closingTime.Add(r.closingDuration).Format(time.RFC3339),
 	)
@@ -326,7 +326,7 @@ func (r *ArbitrageRound) FuturesSymbol() string {
 }
 
 func (r *ArbitrageRound) FuturesTargetPosition() fixedpoint.Value {
-	return r.spotWorker.FilledQuantity().Neg()
+	return r.spotWorker.FilledPosition().Neg()
 }
 
 func (r *ArbitrageRound) State() RoundState {
@@ -360,8 +360,8 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 		// check if the spot and futures positions are fully filled -> PositionReady
 		if r.state == RoundOpening {
 			targetPosition := r.spotWorker.TargetPosition()
-			spotDiff := targetPosition.Sub(r.spotWorker.FilledQuantity())
-			futuresDiff := targetPosition.Neg().Sub(r.futuresWorker.FilledQuantity())
+			spotDiff := targetPosition.Sub(r.spotWorker.FilledPosition())
+			futuresDiff := targetPosition.Neg().Sub(r.futuresWorker.FilledPosition())
 			if spotDiff.IsZero() && futuresDiff.IsZero() {
 				r.state = RoundReady
 				return
@@ -371,7 +371,7 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 		// the state is PositionClosing
 		// check if the spot and futures positions are fully closed -> PositionClosed
 		if r.state == RoundClosing {
-			if r.spotWorker.FilledQuantity().IsZero() && r.futuresWorker.FilledQuantity().IsZero() {
+			if r.spotWorker.FilledPosition().IsZero() && r.futuresWorker.FilledPosition().IsZero() {
 				r.state = RoundClosed
 				r.logger.Infof("positions closed, arbitrage round completed: %s", r.spotWorker.Symbol())
 			}
