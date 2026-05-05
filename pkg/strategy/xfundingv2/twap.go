@@ -32,6 +32,9 @@ const (
 type TWAPWorkerConfig struct {
 	// Duration is the total time duration for the TWAP execution
 	Duration time.Duration `json:"duration"`
+	// ClosingDuration is the expected time duration for the closing phase of the TWAP execution.
+	ClosingDuration time.Duration `json:"closingDuration"`
+
 	// NumSlices is how many slices to divide the total time duration into.
 	NumSlices int `json:"numSlices"`
 	// OrderType specifies whether to use maker or taker orders for execution.

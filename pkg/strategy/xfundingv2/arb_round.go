@@ -49,7 +49,7 @@ type ArbitrageRound struct {
 	spotWorker     *TWAPWorker
 	futuresWorker  *TWAPWorker
 	futuresService FuturesService
-	transferAsset  string // base asset, e.g. "BTC"
+	asset          string // base asset, e.g. "BTC"
 
 	retryDuration      time.Duration
 	retryTransferTickC chan time.Time
@@ -78,7 +78,7 @@ func NewArbitrageRound(
 		spotWorker:           spotTwap,
 		futuresWorker:        futuresTwap,
 		futuresService:       futuresService,
-		transferAsset:        spotTwap.Market().BaseCurrency,
+		asset:                spotTwap.Market().BaseCurrency,
 		state:                RoundPending,
 		retryTransfers:       make(map[uint64]transferRetry),
 		retryTransferTickC:   make(chan time.Time, 1),
@@ -266,7 +266,7 @@ func (r *ArbitrageRound) retryTransferWorker(ctx context.Context) {
 					continue
 				}
 				r.HandleSpotTrade(transfer.Trade, currentTime)
-				r.logger.Infof("retry transfer succeeded (trade: %d): %s %s", tradeID, transfer.Trade.Quantity.String(), r.transferAsset)
+				r.logger.Infof("retry transfer succeeded (trade: %d): %s %s", tradeID, transfer.Trade.Quantity.String(), r.asset)
 			}
 			r.mu.Unlock()
 		}
@@ -289,15 +289,15 @@ func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Tim
 	// try to transfer asset from futures to spot.
 	// if transfer fails, retry in the next tick until it succeeds
 	if err := r.futuresService.TransferFuturesAccountAsset(
-		r.spotWorker.ctx, r.transferAsset, trade.Quantity, types.TransferOut,
+		r.spotWorker.ctx, r.asset, trade.Quantity, types.TransferOut,
 	); err != nil {
 		r.logger.WithError(err).Errorf("failed to transfer %s %s from futures to spot",
-			trade.Quantity.String(), r.transferAsset)
+			trade.Quantity.String(), r.asset)
 		if _, found := r.retryTransfers[trade.ID]; !found {
 			bbgo.Notify(
 				fmt.Errorf("transfer failed (%s %s), retrying: %w",
 					trade.Quantity.String(),
-					r.transferAsset,
+					r.asset,
 					err,
 				),
 			)

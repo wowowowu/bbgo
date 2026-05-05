@@ -26,6 +26,8 @@ func getPostionSign(positionType types.PositionType) int {
 type MarketSelectionConfig struct {
 	FuturesDirection types.PositionType `json:"futuresDirection"`
 
+	MaxHoldingHours types.Duration `json:"maxHoldingHours"`
+
 	// Minimum annualized funding rate to consider (e.g., 0.10 = 10%)
 	// recommended to default to 5%
 	MinAnnualizedRate fixedpoint.Value `json:"minAnnualizedRate"`
@@ -47,6 +49,9 @@ type MarketSelectionConfig struct {
 func (c *MarketSelectionConfig) Defaults() {
 	if c.FuturesDirection == "" {
 		c.FuturesDirection = types.PositionShort
+	}
+	if c.MaxHoldingHours == 0 {
+		c.MaxHoldingHours = types.Duration(time.Hour * 48)
 	}
 	if c.MinAnnualizedRate.IsZero() {
 		c.MinAnnualizedRate = fixedpoint.NewFromFloat(0.05) // 5%
@@ -80,6 +85,8 @@ type MarketCandidate struct {
 
 	// MinHoldingDuration is the estimated minimum holding interval to break even for this market candidate
 	MinHoldingDuration time.Duration
+	// MiinHoldingIntervals = MinHoldingDuration / FundingIntervalHours
+	MinHoldingIntervals int
 }
 
 // MarketSelector selects the best market based on funding rate and liquidity
