@@ -355,10 +355,20 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 		// the state is PositionOpening
 		// check if the spot and futures positions are fully filled -> PositionReady
 		if r.state == RoundOpening {
-			targetPosition := r.spotWorker.TargetPosition()
-			spotDiff := targetPosition.Sub(r.spotWorker.FilledPosition())
-			futuresDiff := targetPosition.Neg().Sub(r.futuresWorker.FilledPosition())
-			if spotDiff.IsZero() && futuresDiff.IsZero() {
+			// get mid price
+			spotBid, _ := spotOrderBook.BestBid()
+			spotAsk, _ := spotOrderBook.BestAsk()
+			futuresBid, _ := futuresOrderBook.BestBid()
+			futuresAsk, _ := futuresOrderBook.BestAsk()
+			spotMidPrice := spotBid.Price.Add(spotAsk.Price).Div(fixedpoint.Two)
+			futuresMidPrice := futuresBid.Price.Add(futuresAsk.Price).Div(fixedpoint.Two)
+
+			spotRemaining := r.spotWorker.RemainingQuantity()
+			futuresRemaining := r.futuresWorker.RemainingQuantity()
+			spotIsDust := r.spotWorker.Market().IsDustQuantity(spotRemaining.Abs(), spotMidPrice)
+			futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresRemaining.Abs(), futuresMidPrice)
+
+			if spotIsDust && futuresIsDust {
 				r.state = RoundReady
 				return
 			}
