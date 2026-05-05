@@ -477,7 +477,7 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 			return
 		}
 
-		selectedCandidate, _ := s.selectMostPorfitableMarket(candidates)
+		selectedCandidate := s.selectMostPorfitableMarket(candidates)
 		if selectedCandidate == nil {
 			// no profitable candidate found, nothing to do
 			return
@@ -490,6 +490,7 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 				s.logger.WithError(err).Errorf("failed to create TWAP worker for spot %s", selectedCandidate.Symbol)
 				return
 			}
+			spotTwap.SetTargetPosition(selectedCandidate.TargetFuturesPosition.Neg())
 			futuresExecutor := s.futuresGeneralOrderExecutors[selectedCandidate.Symbol]
 			futuresTwap, err := NewTWAPWorker(ctx, selectedCandidate.Symbol, s.futuresSession, futuresExecutor, s.TWAPWorkerConfig)
 			if err != nil {
@@ -593,13 +594,13 @@ func (s *Strategy) filterMarketCollateralRate(ctx context.Context, symbols []str
 // selectMostProfitableMarket selects the most profitable market among the candidates based on the estimated break-even holding intervals
 // it will also return the target position for the futures trade
 // the most profitable market is the one with the shortest break-even holding intervals
-func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) (*MarketCandidate, fixedpoint.Value) {
+func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *MarketCandidate {
 	if len(candidates) == 0 {
-		return nil, fixedpoint.Zero
+		return nil
 	}
 	spotAccount := s.spotSession.GetAccount()
 	breakevenIntervals := make(map[string]fixedpoint.Value)
-	targetPositions := make(map[string]fixedpoint.Value)
+	targetFuturePositions := make(map[string]fixedpoint.Value)
 	for _, candidate := range candidates {
 		spotMarket, ok := s.spotSession.Market(candidate.Symbol)
 		if !ok {
@@ -624,7 +625,7 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) (*Ma
 				continue
 			}
 			breakevenIntervals[candidate.Symbol] = breakEvenIntervals
-			targetPositions[candidate.Symbol] = targetSize.Neg()
+			targetFuturePositions[candidate.Symbol] = targetSize.Neg()
 		} else if s.MarketSelectionConfig.FuturesDirection == types.PositionLong {
 			baseBalance, ok := spotAccount.Balance(spotMarket.BaseCurrency)
 			if !ok {
@@ -640,13 +641,13 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) (*Ma
 				continue
 			}
 			breakevenIntervals[candidate.Symbol] = breakEvenIntervals
-			targetPositions[candidate.Symbol] = targetSize
+			targetFuturePositions[candidate.Symbol] = targetSize
 		} else {
-			return nil, fixedpoint.Zero
+			return nil
 		}
 	}
 	if len(breakevenIntervals) == 0 {
-		return nil, fixedpoint.Zero
+		return nil
 	}
 	sortedCandidates := candidates
 	sort.Slice(sortedCandidates, func(i, j int) bool {
@@ -655,12 +656,16 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) (*Ma
 		return breakevenIntervals[candidate1.Symbol].Compare(breakevenIntervals[candidate2.Symbol]) <= 0
 	})
 	bestCandidate := &sortedCandidates[0]
-	targetPosition := targetPositions[bestCandidate.Symbol]
+	targetPosition := targetFuturePositions[bestCandidate.Symbol]
+	if targetPosition.IsZero() {
+		return nil
+	}
 	// set the estimated min holding interval for the selected candidate
 	bestCandidate.MinHoldingIntervals = breakevenIntervals[bestCandidate.Symbol].Int()
 	numHoldingHours := bestCandidate.MinHoldingIntervals * bestCandidate.FundingIntervalHours
 	bestCandidate.MinHoldingDuration = time.Duration(numHoldingHours) * time.Hour
-	return bestCandidate, targetPosition
+	bestCandidate.TargetFuturesPosition = targetPosition
+	return bestCandidate
 }
 
 func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestPrice, targetPosition fixedpoint.Value) (fixedpoint.Value, error) {

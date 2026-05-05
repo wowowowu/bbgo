@@ -83,6 +83,7 @@ type MarketCandidate struct {
 	TakerBuyQuoteVolume24h fixedpoint.Value
 	InRangeDepth           fixedpoint.Value
 
+	TargetFuturesPosition fixedpoint.Value
 	// MinHoldingDuration is the estimated minimum holding interval to break even for this market candidate
 	MinHoldingDuration time.Duration
 	// MiinHoldingIntervals = MinHoldingDuration / FundingIntervalHours
