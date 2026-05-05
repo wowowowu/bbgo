@@ -11,6 +11,7 @@ import (
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
+	"github.com/c9s/bbgo/pkg/util/tradingutil"
 )
 
 type TWAPOrderType string
@@ -32,6 +33,9 @@ const (
 type TWAPWorkerConfig struct {
 	// Duration is the total time duration for the TWAP execution
 	Duration time.Duration `json:"duration"`
+	// ClosingDuration is the expected time duration for the closing phase of the TWAP execution.
+	ClosingDuration time.Duration `json:"closingDuration"`
+
 	// NumSlices is how many slices to divide the total time duration into.
 	NumSlices int `json:"numSlices"`
 	// OrderType specifies whether to use maker or taker orders for execution.
@@ -58,7 +62,6 @@ type TWAPWorker struct {
 	config TWAPWorkerConfig
 
 	targetPosition fixedpoint.Value // positive = buy/long, negative = sell/short
-	side           types.SideType   // derived from targetPosition sign
 
 	// state
 	state     TWAPWorkerState
@@ -70,8 +73,7 @@ type TWAPWorker struct {
 	currentIntervalEnd   time.Time
 	lastCheckTime        time.Time
 
-	symbol   string
-	position *types.Position
+	symbol string
 
 	ctx context.Context
 
@@ -99,10 +101,8 @@ func NewTWAPWorker(
 	w := &TWAPWorker{
 		config:         config,
 		symbol:         symbol,
-		position:       generalExecutor.Position(),
 		state:          TWAPWorkerStatePending,
 		targetPosition: fixedpoint.Zero,
-		side:           types.SideTypeNone,
 	}
 	w.ctx = ctx
 	w.twapExecutor = NewTWAPOrderExecutor(
@@ -117,13 +117,7 @@ func NewTWAPWorker(
 
 // SetTargetPosition sets the target position for the TWAP worker.
 func (w *TWAPWorker) SetTargetPosition(targetPosition fixedpoint.Value) {
-	targetDiff := targetPosition.Sub(w.position.Base)
 	w.targetPosition = targetPosition
-	if targetDiff.Sign() > 0 {
-		w.side = types.SideTypeBuy
-	} else if targetDiff.Sign() < 0 {
-		w.side = types.SideTypeSell
-	}
 }
 
 func (w *TWAPWorker) SetLogger(logger logrus.FieldLogger) {
@@ -160,14 +154,51 @@ func (w *TWAPWorker) AveragePrice() fixedpoint.Value {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return w.position.AverageCost
+	trades := w.twapExecutor.AllTrades()
+	return tradingutil.AveragePriceFromTrades(trades)
 }
 
-func (w *TWAPWorker) FilledQuantity() fixedpoint.Value {
+func (w *TWAPWorker) FilledPosition() fixedpoint.Value {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return w.position.Base
+	return w.filledPosition()
+}
+
+// AddTrade adds a trade to the worker if it belongs to an order managed by this worker.
+func (w *TWAPWorker) AddTrade(trade types.Trade) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.twapExecutor.AddTrade(trade)
+}
+
+func (w *TWAPWorker) filledPosition() fixedpoint.Value {
+	trades := w.twapExecutor.AllTrades()
+	position := fixedpoint.Zero
+	for _, t := range trades {
+		if t.Side == types.SideTypeBuy {
+			position = position.Add(t.Quantity)
+		} else {
+			position = position.Sub(t.Quantity)
+		}
+	}
+	return position
+}
+
+func (w *TWAPWorker) TotalFee() map[string]fixedpoint.Value {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	trades := w.twapExecutor.AllTrades()
+	feeMap := make(map[string]fixedpoint.Value)
+	for _, t := range trades {
+		if t.FeeCurrency == "" || t.Fee.IsZero() {
+			continue
+		}
+		feeMap[t.FeeCurrency] = feeMap[t.FeeCurrency].Add(t.Fee)
+	}
+	return feeMap
 }
 
 func (w *TWAPWorker) ActiveOrder() *types.Order {
@@ -175,13 +206,6 @@ func (w *TWAPWorker) ActiveOrder() *types.Order {
 	defer w.mu.Unlock()
 
 	return w.activeOrder
-}
-
-func (w *TWAPWorker) TotalFee() map[string]fixedpoint.Value {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	return w.position.TotalFee
 }
 
 func (w *TWAPWorker) RemainingQuantity() fixedpoint.Value {
@@ -194,7 +218,7 @@ func (w *TWAPWorker) RemainingQuantity() fixedpoint.Value {
 func (w *TWAPWorker) remainingQuantity() fixedpoint.Value {
 	// remaining = target - filled
 	// NOTE: the remaining quantity can be positive or negative.
-	return w.targetPosition.Sub(w.position.Base)
+	return w.targetPosition.Sub(w.filledPosition())
 }
 
 func (w *TWAPWorker) TargetPosition() fixedpoint.Value {
@@ -202,13 +226,6 @@ func (w *TWAPWorker) TargetPosition() fixedpoint.Value {
 	defer w.mu.Unlock()
 
 	return w.targetPosition
-}
-
-func (w *TWAPWorker) Position() *types.Position {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	return w.position
 }
 
 func (w *TWAPWorker) Start(ctx context.Context, currentTime time.Time) error {
@@ -224,7 +241,6 @@ func (w *TWAPWorker) Start(ctx context.Context, currentTime time.Time) error {
 		w.logger = logrus.WithFields(logrus.Fields{
 			"component": "twap",
 			"symbol":    w.symbol,
-			"side":      w.side.String(),
 		})
 	}
 
@@ -306,7 +322,7 @@ func (w *TWAPWorker) Stop() {
 		w.activeOrder = nil
 		w.logger.Infof(
 			"[TWAP Stop] stopped: filled=%s / target=%s",
-			w.position.Base, w.targetPosition,
+			w.filledPosition(), w.targetPosition,
 		)
 	}
 }
@@ -369,7 +385,8 @@ func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) erro
 
 	// it's running and currentTime is after the current interval start
 	// time to check if we need to place/cancel/replace orders
-	remaining := w.remainingQuantity().Abs()
+	// NOTE: remaining can be positive or negative
+	remaining := w.remainingQuantity()
 
 	// target reached, do nothing
 	if remaining.IsZero() {
@@ -388,8 +405,8 @@ func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) erro
 			w.syncAndResetActiveOrder()
 		}
 		createdOrder, err := w.twapExecutor.PlaceOrder(
-			remaining,
-			w.side,
+			remaining.Abs(),
+			orderSide(remaining),
 			orderBook,
 			true,
 		)
@@ -404,7 +421,7 @@ func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) erro
 	// we don't have an active order, place a new one
 	if w.activeOrder == nil {
 		sliceQty := w.calculateSliceQuantity(currentTime, remaining, false)
-		createdOrder, err := w.twapExecutor.PlaceOrder(sliceQty, w.side, orderBook, false)
+		createdOrder, err := w.twapExecutor.PlaceOrder(sliceQty, orderSide(remaining), orderBook, false)
 		if err != nil || createdOrder == nil {
 			return fmt.Errorf("failed to place order: %w", err)
 		}
@@ -457,7 +474,7 @@ func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) erro
 	// currentTime is after current interval end, time to place the next slice order
 	// calculate slice quantity
 	sliceQty := w.calculateSliceQuantity(currentTime, remaining, deadlineExceeded)
-	createdOrder, err := w.twapExecutor.PlaceOrder(sliceQty, w.side, orderBook, deadlineExceeded)
+	createdOrder, err := w.twapExecutor.PlaceOrder(sliceQty, orderSide(remaining), orderBook, deadlineExceeded)
 	if err != nil || createdOrder == nil {
 		return fmt.Errorf("failed to place order for next slice: %w", err)
 	}
@@ -520,14 +537,14 @@ func (w *TWAPWorker) shouldUpdateActiveOrder(orderBook types.OrderBook) bool {
 		return true
 	}
 
-	newPrice, err := w.twapExecutor.GetPrice(w.side, orderBook)
+	newPrice, err := w.twapExecutor.GetPrice(w.activeOrder.Side, orderBook)
 	if err != nil {
 		w.logger.WithError(err).Warn("[TWAP shouldUpdateOrder] failed to get price for order update check")
 		return false
 	}
 
 	newPriceBtter := false
-	switch w.side {
+	switch w.activeOrder.Side {
 	case types.SideTypeBuy:
 		newPriceBtter = newPrice.Compare(w.activeOrder.Price) > 0
 	case types.SideTypeSell:
@@ -536,4 +553,11 @@ func (w *TWAPWorker) shouldUpdateActiveOrder(orderBook types.OrderBook) bool {
 	w.logger.Infof("[TWAP shouldUpdateOrder] order update check: current price=%s, new price=%s, better=%t",
 		w.activeOrder.Price.String(), newPrice.String(), newPriceBtter)
 	return newPriceBtter
+}
+
+func orderSide(remaining fixedpoint.Value) types.SideType {
+	if remaining.Sign() > 0 {
+		return types.SideTypeBuy
+	}
+	return types.SideTypeSell
 }

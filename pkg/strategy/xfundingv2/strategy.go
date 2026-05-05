@@ -16,6 +16,7 @@ import (
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/time/rate"
 )
 
 const ID = "xfundingv2"
@@ -37,7 +38,8 @@ type Strategy struct {
 
 	// CandidateSymbols is the list of symbols to consider for selection
 	// IMPORTANT: xfundingv2 is now assuming trading on U-major pairs
-	CandidateSymbols []string `json:"candidateSymbols"`
+	CandidateSymbols     []string       `json:"candidateSymbols"`
+	OpenPositionInterval types.Duration `json:"openPositionInterval"`
 
 	// TickSymbol is the symbol used for ticking the strategy, default to the first candidate symbol
 	TickSymbol string `json:"tickSymbol"`
@@ -51,6 +53,7 @@ type Strategy struct {
 	ClosePositionOnExit bool          `json:"closePositionOnExit"`
 
 	spotSession, futuresSession *bbgo.ExchangeSession
+	futuresService              FuturesService
 
 	// stream order books to keep track of the latest order book for the candidate symbols
 	futuresOrderBooks, spotOrderBooks map[string]*types.StreamOrderBook
@@ -74,7 +77,8 @@ type Strategy struct {
 	spotGeneralOrderExecutors    map[string]*bbgo.GeneralOrderExecutor
 	futuresGeneralOrderExecutors map[string]*bbgo.GeneralOrderExecutor
 
-	logger logrus.FieldLogger
+	logger     logrus.FieldLogger
+	logLimiter *rate.Limiter
 }
 
 func (s *Strategy) ID() string {
@@ -93,6 +97,9 @@ func (s *Strategy) Defaults() error {
 
 	if s.TickSymbol == "" {
 		s.TickSymbol = s.CandidateSymbols[0]
+	}
+	if s.OpenPositionInterval.Duration() == 0 {
+		s.OpenPositionInterval = types.Duration(time.Minute * 30)
 	}
 
 	if s.MarketSelectionConfig == nil {
@@ -132,7 +139,9 @@ func (s *Strategy) Initialize() error {
 	if s.futuresGeneralOrderExecutors == nil {
 		s.futuresGeneralOrderExecutors = make(map[string]*bbgo.GeneralOrderExecutor)
 	}
-
+	if !bbgo.IsBackTesting {
+		s.logLimiter = rate.NewLimiter(rate.Every(time.Minute*10), 1)
+	}
 	return nil
 }
 
@@ -178,6 +187,12 @@ func (s *Strategy) CrossRun(
 		return fmt.Errorf("sessioin %s does not support futures", s.futuresSession.Name)
 	} else if !futuresEx.GetFuturesSettings().IsFutures {
 		return fmt.Errorf("session %s is not configured for futures trading", s.futuresSession.Name)
+	}
+
+	if futuresService, ok := s.futuresSession.Exchange.(FuturesService); !ok {
+		return fmt.Errorf("futures session exchange does not support futures service: %s", s.futuresSession.ExchangeName)
+	} else {
+		s.futuresService = futuresService
 	}
 
 	if _, ok := s.spotSession.Exchange.(types.ExchangeOrderQueryService); !ok {
@@ -322,6 +337,16 @@ func (s *Strategy) CrossRun(
 			}
 		}
 	})
+	s.futuresSession.UserDataStream.OnTradeUpdate(func(trade types.Trade) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		for _, round := range s.activeRounds {
+			if round.HasOrder(trade.OrderID) {
+				round.HandleFuturesTrade(trade, trade.Time.Time())
+			}
+		}
+	})
 
 	// Register shutdown handler to persist state
 	bbgo.OnShutdown(ctx, func(ctx context.Context, wg *sync.WaitGroup) {
@@ -341,32 +366,21 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 
 	// start processing
 	// 1. check if there is any active round needs to be closed
-	// remove closed active rounds
-	for symbol, round := range s.activeRounds {
-		if round.GetState() == RoundClosed {
-			s.logger.Infof("removing closed round for symbol %s", symbol)
-			delete(s.activeRounds, symbol)
-		}
+	// transit round states
+	for _, round := range s.activeRounds {
+		s.transitRoundState(ctx, round, tickTime)
 	}
-	// TODO: check if existing active rounds need to be marked as closing
+
+	// remove closed active rounds
+	for _, round := range s.activeRounds {
+		if round.State() == RoundClosed {
+			s.handleRoundExit(ctx, round)
+		}
+		// TODO: insert closed round records into database
+	}
 
 	// 2. check if new round can be opened or existing round needs to be adjusted
-	candidates, err := s.preliminaryMarketSelector.SelectMarkets(ctx, s.candidateSymbols)
-	if err != nil {
-		s.logger.WithError(err).Error("failed to select market candidates")
-		return
-	}
-	if len(candidates) == 0 {
-		// no candidates, nothing to do in this round
-		return
-	}
-
-	selectedCandidate, _ := s.selectMostPorfitableMarket(candidates)
-	if selectedCandidate == nil {
-		// no profitable candidate found, nothing to do in this round
-		return
-	}
-	// TODO: implement round opening logic with the selected candidate
+	s.checkOpenNewRound(ctx, tickTime)
 
 	// tick existing active rounds
 	for _, round := range s.activeRounds {
@@ -374,7 +388,141 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 		futuresOrderBook := s.futuresOrderBooks[round.futuresWorker.Symbol()].Copy()
 		round.Tick(tickTime, spotOrderBook, futuresOrderBook)
 	}
+}
 
+func (s *Strategy) transitRoundState(ctx context.Context, round *ArbitrageRound, currentTime time.Time) {
+	if !round.IsClosable(currentTime) {
+		return
+	}
+	switch round.State() {
+	case RoundOpening:
+		s.transitOpeningRound(ctx, round, currentTime)
+	case RoundReady:
+		s.transitReadyRound(ctx, round, currentTime)
+	case RoundClosing:
+		s.transitClosingRound(ctx, round, currentTime)
+	}
+}
+
+func (s *Strategy) transitOpeningRound(ctx context.Context, round *ArbitrageRound, currentTime time.Time) {
+	// the round is expired and is in opening state
+	// if the current funding rate is still favorable, keep opening, otherwise transit to closing
+	timedCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+
+	fundingRate, err := s.futuresService.QueryPremiumIndex(timedCtx, round.FuturesSymbol())
+	if err != nil {
+		return
+	}
+
+	if getPostionSign(s.MarketSelectionConfig.FuturesDirection)*fundingRate.LastFundingRate.Sign() >= 0 {
+		// the funding rate is not favorable anymore, transit to closing
+		// short futures -> positive funding rate for funding income
+		// long futures -> negative funding rate for funding income
+		s.logger.Infof(
+			"[transitOpeningRound %s] transit to closing, current funding rate %s: %s",
+			currentTime.Format(time.RFC3339), fundingRate.LastFundingRate, round)
+		round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration)
+	} else if s.allowLog(currentTime) {
+		s.logger.Infof(
+			"[transitOpeningRound %s] round stays opening, current funding rate %s: %s",
+			currentTime.Format(time.RFC3339), fundingRate.LastFundingRate, round,
+		)
+	}
+}
+
+func (s *Strategy) transitReadyRound(ctx context.Context, round *ArbitrageRound, currentTime time.Time) {
+	// the round is expired and is in ready state
+	// if the current funding rate is still favorable, keep ready, otherwise transit to closing
+	timedCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+
+	fundingRate, err := s.futuresService.QueryPremiumIndex(timedCtx, round.FuturesSymbol())
+	if err != nil {
+		return
+	}
+
+	if getPostionSign(s.MarketSelectionConfig.FuturesDirection)*fundingRate.LastFundingRate.Sign() >= 0 {
+		// the funding rate is not favorable anymore, transit to closing
+		// short futures -> positive funding rate for funding income
+		// long futures -> negative funding rate for funding income
+		s.logger.Infof(
+			"[transitReadyRound %s] transit to closing, current funding rate %s: %s",
+			currentTime.Format(time.RFC3339), fundingRate.LastFundingRate, round,
+		)
+		round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration)
+	} else if s.allowLog(currentTime) {
+		s.logger.Infof(
+			"[transitReadyRound %s] round stays ready, current funding rate %s: %s",
+			currentTime.Format(time.RFC3339), fundingRate.LastFundingRate, round,
+		)
+	}
+}
+
+func (s *Strategy) transitClosingRound(ctx context.Context, round *ArbitrageRound, currentTime time.Time) {
+	// the round is expired and is in closing state, keep it closing until it's closed
+	if s.allowLog(currentTime) {
+		s.logger.Infof("[transitClosingRound %s] round is closing: %s",
+			currentTime.Format(time.RFC3339), round)
+	}
+}
+
+func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time) {
+	if len(s.activeRounds) == 0 {
+		// Only open new round when there is no active round
+		// TODO: support multiple active rounds for different symbols concurrently (e.g BTCUSDT and ETHUSDT)
+		candidates, err := s.preliminaryMarketSelector.SelectMarkets(ctx, s.candidateSymbols)
+		if err != nil {
+			s.logger.WithError(err).Error("failed to select market candidates")
+			return
+		}
+		if len(candidates) == 0 {
+			// no candidates, nothing to do
+			return
+		}
+
+		selectedCandidate, _ := s.selectMostPorfitableMarket(candidates)
+		if selectedCandidate == nil {
+			// no profitable candidate found, nothing to do
+			return
+		}
+		// open new round if the estimated break-even holding interval is within the max holding hours
+		if selectedCandidate.MinHoldingDuration <= s.MarketSelectionConfig.MaxHoldingHours.Duration() {
+			spotExecutor := s.spotGeneralOrderExecutors[selectedCandidate.Symbol]
+			spotTwap, err := NewTWAPWorker(ctx, selectedCandidate.Symbol, s.spotSession, spotExecutor, s.TWAPWorkerConfig)
+			if err != nil {
+				s.logger.WithError(err).Errorf("failed to create TWAP worker for spot %s", selectedCandidate.Symbol)
+				return
+			}
+			futuresExecutor := s.futuresGeneralOrderExecutors[selectedCandidate.Symbol]
+			futuresTwap, err := NewTWAPWorker(ctx, selectedCandidate.Symbol, s.futuresSession, futuresExecutor, s.TWAPWorkerConfig)
+			if err != nil {
+				s.logger.WithError(err).Errorf("failed to create TWAP worker for futures %s", selectedCandidate.Symbol)
+				return
+			}
+			round := NewArbitrageRound(
+				selectedCandidate.LastFundingRate,
+				selectedCandidate.MinHoldingIntervals,
+				selectedCandidate.FundingIntervalHours,
+				spotTwap,
+				futuresTwap,
+				s.futuresService,
+			)
+			round.SetLogger(s.logger)
+			if err := round.Start(ctx, currentTime); err != nil {
+				s.logger.WithError(err).Errorf("failed to start arbitrage round: %s", selectedCandidate.Symbol)
+				return
+			}
+			s.activeRounds[selectedCandidate.Symbol] = round
+		}
+	}
+}
+
+func (s *Strategy) allowLog(currentTime time.Time) bool {
+	if s.logLimiter == nil {
+		return false
+	}
+	return s.logLimiter.AllowN(currentTime, 1)
 }
 
 // static market filters
@@ -513,7 +661,8 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) (*Ma
 	bestCandidate := &sortedCandidates[0]
 	targetPosition := targetPositions[bestCandidate.Symbol]
 	// set the estimated min holding interval for the selected candidate
-	numHoldingHours := breakevenIntervals[bestCandidate.Symbol].Int() * bestCandidate.FundingIntervalHours
+	bestCandidate.MinHoldingIntervals = breakevenIntervals[bestCandidate.Symbol].Int()
+	numHoldingHours := bestCandidate.MinHoldingIntervals * bestCandidate.FundingIntervalHours
 	bestCandidate.MinHoldingDuration = time.Duration(numHoldingHours) * time.Hour
 	return bestCandidate, targetPosition
 }
@@ -548,4 +697,31 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 	}
 	breakEvenIntervals := totalCost.Div(estimateFundingFeePerInterval).Round(0, fixedpoint.Up)
 	return breakEvenIntervals, nil
+}
+
+func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound) {
+	var asset string
+	switch s.MarketSelectionConfig.FuturesDirection {
+	case types.PositionShort:
+		// short futures -> transfer base currency
+		asset = round.futuresWorker.Market().BaseCurrency
+	case types.PositionLong:
+		// long futures -> transfer quote currency
+		asset = round.futuresWorker.Market().QuoteCurrency
+	}
+	account := s.futuresSession.GetAccount()
+	balance, ok := account.Balance(asset)
+	if !ok {
+		s.logger.Warnf("balance not found for asset %s when handling round exit: %s", asset, round)
+	} else if balance.Available.Sign() > 0 {
+		// transfer the remaining balance back to spot account if there is any
+		if err := s.futuresService.TransferFuturesAccountAsset(ctx, asset, balance.Available, types.TransferOut); err != nil {
+			s.logger.WithError(err).Errorf("failed to transfer %s during round exit: %s", asset, round)
+		} else {
+			s.logger.Infof("transferred out %s during round exit: %s", asset, round)
+		}
+	}
+
+	s.logger.Infof("removing closed round: %s", round)
+	delete(s.activeRounds, round.SpotSymbol())
 }
