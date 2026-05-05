@@ -294,6 +294,8 @@ func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Tim
 		return
 	}
 
+	r.spotWorker.AddTrade(trade)
+
 	// try to transfer asset from spot to futures.
 	// if transfer fails, retry in the next tick until it succeeds
 	if err := r.futuresService.TransferFuturesAccountAsset(
@@ -319,6 +321,14 @@ func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Tim
 	// transfer succeeded, remove from retry list if exists
 	delete(r.retryTransfers, trade.ID)
 	r.syncFuturesPosition(trade)
+}
+
+func (r *ArbitrageRound) HandleFuturesTrade(trade types.Trade, currentTime time.Time) {
+	if trade.Symbol != r.futuresWorker.Symbol() || !trade.IsFutures {
+		return
+	}
+	r.logger.Infof("handling future trade: %s", trade)
+	r.futuresWorker.AddTrade(trade)
 }
 
 func (r *ArbitrageRound) SetLogger(logger logrus.FieldLogger) {

@@ -3,6 +3,7 @@ package xfundingv2
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/c9s/bbgo/pkg/bbgo"
@@ -14,6 +15,7 @@ import (
 type TWAPExecutor struct {
 	TWAPWorkerConfig
 
+	mu  sync.Mutex
 	ctx context.Context
 
 	exchange types.ExchangeOrderQueryService
@@ -21,6 +23,7 @@ type TWAPExecutor struct {
 	executor *bbgo.GeneralOrderExecutor
 
 	ordersMap map[uint64]struct{}
+	trades    []types.Trade
 
 	logger logrus.FieldLogger
 }
@@ -56,6 +59,17 @@ func (o *TWAPExecutor) Start() {
 				"symbol":    o.market.Symbol,
 			},
 		)
+	}
+}
+
+// AddTrade adds a trade to the executor's internal trade list if it belongs to
+// an order managed by this executor.
+func (o *TWAPExecutor) AddTrade(trade types.Trade) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if _, exists := o.ordersMap[trade.OrderID]; exists {
+		o.trades = append(o.trades, trade)
 	}
 }
 
@@ -119,14 +133,7 @@ func (o *TWAPExecutor) AllOrders() []types.Order {
 }
 
 func (o *TWAPExecutor) AllTrades() []types.Trade {
-	var trades []types.Trade
-	for orderID := range o.ordersMap {
-		if order, exists := o.executor.OrderStore().Get(orderID); exists {
-			orderTrades := o.executor.TradeCollector().TradeStore().GetOrderTrades(order)
-			trades = append(trades, orderTrades...)
-		}
-	}
-	return trades
+	return o.trades
 }
 
 // place order

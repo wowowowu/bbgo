@@ -337,6 +337,16 @@ func (s *Strategy) CrossRun(
 			}
 		}
 	})
+	s.futuresSession.UserDataStream.OnTradeUpdate(func(trade types.Trade) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		for _, round := range s.activeRounds {
+			if round.HasOrder(trade.OrderID) {
+				round.HandleFuturesTrade(trade, trade.Time.Time())
+			}
+		}
+	})
 
 	// Register shutdown handler to persist state
 	bbgo.OnShutdown(ctx, func(ctx context.Context, wg *sync.WaitGroup) {

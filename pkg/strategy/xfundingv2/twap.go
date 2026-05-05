@@ -165,6 +165,14 @@ func (w *TWAPWorker) FilledPosition() fixedpoint.Value {
 	return w.filledPosition()
 }
 
+// AddTrade adds a trade to the worker if it belongs to an order managed by this worker.
+func (w *TWAPWorker) AddTrade(trade types.Trade) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.twapExecutor.AddTrade(trade)
+}
+
 func (w *TWAPWorker) filledPosition() fixedpoint.Value {
 	trades := w.twapExecutor.AllTrades()
 	position := fixedpoint.Zero
