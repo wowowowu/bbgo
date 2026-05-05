@@ -325,10 +325,6 @@ func (r *ArbitrageRound) FuturesSymbol() string {
 	return r.futuresWorker.Symbol()
 }
 
-func (r *ArbitrageRound) FuturesTargetPosition() fixedpoint.Value {
-	return r.spotWorker.FilledPosition().Neg()
-}
-
 func (r *ArbitrageRound) State() RoundState {
 	return r.state
 }
