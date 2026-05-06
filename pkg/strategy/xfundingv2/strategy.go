@@ -40,6 +40,7 @@ type Strategy struct {
 	// IMPORTANT: xfundingv2 is now assuming trading on U-major pairs
 	CandidateSymbols     []string       `json:"candidateSymbols"`
 	OpenPositionInterval types.Duration `json:"openPositionInterval"`
+	TransitRoundInterval types.Duration `json:"transitRoundInterval"`
 
 	// TickSymbol is the symbol used for ticking the strategy, default to the first candidate symbol
 	TickSymbol string `json:"tickSymbol"`
@@ -100,6 +101,9 @@ func (s *Strategy) Defaults() error {
 	}
 	if s.OpenPositionInterval.Duration() == 0 {
 		s.OpenPositionInterval = types.Duration(time.Minute * 30)
+	}
+	if s.TransitRoundInterval.Duration() == 0 {
+		s.TransitRoundInterval = types.Duration(time.Minute * 10)
 	}
 
 	if s.MarketSelectionConfig == nil {
@@ -387,7 +391,20 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 }
 
 func (s *Strategy) transitRoundState(ctx context.Context, round *ArbitrageRound, currentTime time.Time) {
+	// still in the first funding interval, do not transit
 	if round.NumHoldingIntervals(currentTime) <= 1 {
+		if round.LastUpdateTime().IsZero() {
+			round.SetUpdateTime(currentTime)
+		}
+		return
+	}
+	lastUpdateTime := round.LastUpdateTime()
+	if lastUpdateTime.IsZero() {
+		lastUpdateTime = currentTime
+		round.SetUpdateTime(currentTime)
+	}
+
+	if currentTime.Sub(lastUpdateTime) < s.TransitRoundInterval.Duration() {
 		return
 	}
 
@@ -397,6 +414,7 @@ func (s *Strategy) transitRoundState(ctx context.Context, round *ArbitrageRound,
 	case RoundClosing:
 		s.transitClosingRound(ctx, round, currentTime)
 	}
+	round.SetUpdateTime(currentTime)
 }
 
 func (s *Strategy) transitOpeningOrReadyRound(ctx context.Context, round *ArbitrageRound, currentTime time.Time) {

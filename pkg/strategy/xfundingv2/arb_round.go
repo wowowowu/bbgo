@@ -66,6 +66,8 @@ type ArbitrageRound struct {
 	// closingTime is the time when the round is entered closing state
 	closingTime     time.Time
 	closingDuration time.Duration
+	// lastUpdateTime is the last time when the round is updated
+	lastUpdateTime time.Time
 }
 
 func NewArbitrageRound(
@@ -125,6 +127,14 @@ func (r *ArbitrageRound) MinHoldingIntervals() int {
 
 func (r *ArbitrageRound) TargetPosition() fixedpoint.Value {
 	return r.spotWorker.TargetPosition()
+}
+
+func (r *ArbitrageRound) LastUpdateTime() time.Time {
+	return r.lastUpdateTime
+}
+
+func (r *ArbitrageRound) SetUpdateTime(t time.Time) {
+	r.lastUpdateTime = t
 }
 
 func (r *ArbitrageRound) String() string {
