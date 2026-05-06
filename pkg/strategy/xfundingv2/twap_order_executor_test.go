@@ -392,23 +392,50 @@ func TestTWAPOrderExecutor_PlaceOrder(t *testing.T) {
 }
 
 func TestTWAPOrderExecutor_SyncOrder(t *testing.T) {
-	t.Run("order not in store returns error", func(t *testing.T) {
+	t.Run("order not in store queries exchange and adds order", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
 		config := TWAPWorkerConfig{}
-		executor, _, _ := testExecutorSetup(t, ctrl, config)
+		executor, mockOrderQuery, _ := testExecutorSetup(t, ctrl, config)
 
 		order := types.Order{
 			OrderID: 12345,
 			SubmitOrder: types.SubmitOrder{
-				Symbol: "BTCUSDT",
+				Symbol:   "BTCUSDT",
+				Quantity: Number(1.0),
 			},
 		}
 
+		updatedOrder := &types.Order{
+			OrderID: 12345,
+			SubmitOrder: types.SubmitOrder{
+				Symbol:   "BTCUSDT",
+				Quantity: Number(1.0),
+			},
+			ExecutedQuantity: Number(0.5),
+			Status:           types.OrderStatusPartiallyFilled,
+		}
+		trades := []types.Trade{
+			{ID: 1, OrderID: 12345},
+		}
+
+		mockOrderQuery.EXPECT().
+			QueryOrder(gomock.Any(), gomock.Any()).
+			Return(updatedOrder, nil).
+			Times(1)
+		mockOrderQuery.EXPECT().
+			QueryOrderTrades(gomock.Any(), gomock.Any()).
+			Return(trades, nil).
+			Times(1)
+
 		err := executor.SyncOrder(order)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "order not found in store")
+		assert.NoError(t, err)
+
+		// Verify order was added to store
+		storedOrder, found := executor.executor.OrderStore().Get(12345)
+		assert.True(t, found)
+		assert.Equal(t, types.OrderStatusPartiallyFilled, storedOrder.Status)
 	})
 
 	t.Run("fully filled order skips sync", func(t *testing.T) {
@@ -656,7 +683,7 @@ func TestTWAPOrderExecutor_GetOrder(t *testing.T) {
 			Symbol: "BTCUSDT",
 		},
 	}
-	executor.ordersMap[order.OrderID] = struct{}{} // Add to ordersMap to simulate tracking
+	executor.orders[order.OrderID] = order.AsQuery() // Add to ordersMap to simulate tracking
 	executor.executor.OrderStore().Add(order)
 
 	// Test GetOrder
