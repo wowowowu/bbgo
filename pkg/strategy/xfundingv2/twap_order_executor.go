@@ -22,8 +22,8 @@ type TWAPExecutor struct {
 	market   types.Market
 	executor *bbgo.GeneralOrderExecutor
 
-	ordersMap map[uint64]struct{}
-	trades    []types.Trade
+	orders map[uint64]types.OrderQuery
+	trades map[uint64]types.Trade
 
 	logger logrus.FieldLogger
 }
@@ -43,7 +43,8 @@ func NewTWAPOrderExecutor(
 		executor: executor,
 		market:   market,
 
-		ordersMap: make(map[uint64]struct{}),
+		orders: make(map[uint64]types.OrderQuery),
+		trades: make(map[uint64]types.Trade),
 	}
 }
 
@@ -68,8 +69,8 @@ func (o *TWAPExecutor) AddTrade(trade types.Trade) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if _, exists := o.ordersMap[trade.OrderID]; exists {
-		o.trades = append(o.trades, trade)
+	if _, exists := o.orders[trade.OrderID]; exists {
+		o.trades[trade.ID] = trade
 	}
 }
 
@@ -78,13 +79,12 @@ func (o *TWAPExecutor) Stop() error {
 	return nil
 }
 
+// SyncOrder queries the latest order status and updates the internal store and trades.
+// it's designed to be called to restore the state of the executor after a restart or to sync a existing order.
+// it's not thread-safe
 func (o *TWAPExecutor) SyncOrder(order types.Order) error {
-	storeOrder, ok := o.executor.OrderStore().Get(order.OrderID)
-	if !ok {
-		return fmt.Errorf("order not found in store: %s", order)
-	}
-
-	if storeOrder.GetRemainingQuantity().IsZero() {
+	storeOrder, exists := o.executor.OrderStore().Get(order.OrderID)
+	if exists && storeOrder.GetRemainingQuantity().IsZero() {
 		return nil
 	}
 
@@ -105,17 +105,23 @@ func (o *TWAPExecutor) SyncOrder(order types.Order) error {
 		return fmt.Errorf("failed to query order trades: %v, %v", query, err)
 	}
 
-	// order exists in the store (by the check at the beginning), we update the order
-	o.executor.OrderStore().Update(*updatedOrder)
-	for _, trade := range trades {
-		o.executor.TradeCollector().ProcessTrade(trade)
+	orderStore := o.executor.OrderStore()
+	if !exists {
+		orderStore.AddOrderUpdate = true
 	}
+	orderStore.HandleOrderUpdate(*updatedOrder)
+	orderStore.AddOrderUpdate = false
+	tradeCollector := o.executor.TradeCollector()
+	for _, trade := range trades {
+		tradeCollector.ProcessTrade(trade)
+	}
+	tradeCollector.Process()
 
 	return nil
 }
 
 func (o *TWAPExecutor) GetOrder(orderID uint64) (types.Order, bool) {
-	if _, exists := o.ordersMap[orderID]; !exists {
+	if _, exists := o.orders[orderID]; !exists {
 		return types.Order{}, false
 	}
 	return o.executor.OrderStore().Get(orderID)
@@ -124,7 +130,7 @@ func (o *TWAPExecutor) GetOrder(orderID uint64) (types.Order, bool) {
 func (o *TWAPExecutor) AllOrders() []types.Order {
 	var orders []types.Order
 
-	for orderID := range o.ordersMap {
+	for orderID := range o.orders {
 		if order, exists := o.executor.OrderStore().Get(orderID); exists {
 			orders = append(orders, order)
 		}
@@ -133,7 +139,11 @@ func (o *TWAPExecutor) AllOrders() []types.Order {
 }
 
 func (o *TWAPExecutor) AllTrades() []types.Trade {
-	return o.trades
+	var trades []types.Trade
+	for _, trade := range o.trades {
+		trades = append(trades, trade)
+	}
+	return trades
 }
 
 // place order
@@ -158,7 +168,7 @@ func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType
 	if err != nil || len(createdOrders) == 0 {
 		return nil, fmt.Errorf("failed to submit order: %+v, %v", order, err)
 	}
-	o.ordersMap[createdOrders[0].OrderID] = struct{}{}
+	o.orders[createdOrders[0].OrderID] = createdOrders[0].AsQuery()
 	return &createdOrders[0], nil
 }
 
