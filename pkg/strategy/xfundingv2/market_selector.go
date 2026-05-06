@@ -74,7 +74,7 @@ func (c *MarketSelectionConfig) Defaults() {
 type MarketCandidate struct {
 	Symbol string
 
-	LastFundingRate fixedpoint.Value
+	PremiumIndex *types.PremiumIndex
 	// FundingIntervalHours is the funding interval in hours (e.g., 8 for 8h funding)
 	// It's normally 8 for the most Binance perpetuals, but some may have different intervals like 4h.
 	// See https://www.binance.com/en/futures/funding-history/perpetual/real-time-funding-rate
@@ -186,7 +186,7 @@ func (s *MarketSelector) SelectMarkets(ctx context.Context, symbols []string) ([
 		candidates = append(candidates, MarketCandidate{
 			Symbol:                 idx.Symbol,
 			FundingIntervalHours:   info.FundingIntervalHours,
-			LastFundingRate:        idx.LastFundingRate,
+			PremiumIndex:           idx,
 			AnnualizedRate:         annualized,
 			TakerBuyQuoteVolume24h: takerQuoteVol,
 			InRangeDepth:           inRangeDepth,

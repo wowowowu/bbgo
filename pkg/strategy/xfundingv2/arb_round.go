@@ -41,9 +41,11 @@ type transferRetry struct {
 type ArbitrageRound struct {
 	mu sync.Mutex
 
-	triggeredFundingRate fixedpoint.Value
-	minHoldingIntervals  int
-	fundingIntervalHours int
+	triggeredFundingRate                     fixedpoint.Value
+	minHoldingIntervals                      int
+	fundingIntervalHours                     int
+	fundingIntervalStart, fundingIntervalEnd time.Time
+	fundingFeeRecords                        map[int64]FundingFee
 
 	// TWAP workers
 	spotWorker     *TWAPWorker
@@ -54,8 +56,6 @@ type ArbitrageRound struct {
 	retryDuration      time.Duration
 	retryTransferTickC chan time.Time
 	retryTransfers     map[uint64]transferRetry
-
-	fundingFeeRecords map[int64]FundingFee
 
 	state RoundState
 
@@ -69,7 +69,7 @@ type ArbitrageRound struct {
 }
 
 func NewArbitrageRound(
-	fundingRate fixedpoint.Value, minHoldingIntervals, fundingIntervalHours int,
+	fundingRate *types.PremiumIndex, minHoldingIntervals, fundingIntervalHours int,
 	spotTwap, futuresTwap *TWAPWorker, futuresService FuturesService) *ArbitrageRound {
 	var asset string
 	if spotTwap.TargetPosition().Sign() > 0 {
@@ -79,18 +79,25 @@ func NewArbitrageRound(
 		// short spot, long futures -> collateral is quote asset
 		asset = spotTwap.Market().QuoteCurrency
 	}
+	fundingIntervalStart := fundingRate.NextFundingTime.Add(-time.Duration(fundingIntervalHours) * time.Hour)
+	fundingIntervalEnd := fundingRate.NextFundingTime.Add(-time.Second)
 	return &ArbitrageRound{
-		triggeredFundingRate: fundingRate,
+		triggeredFundingRate: fundingRate.LastFundingRate,
 		minHoldingIntervals:  minHoldingIntervals,
 		fundingIntervalHours: fundingIntervalHours,
-		spotWorker:           spotTwap,
-		futuresWorker:        futuresTwap,
-		futuresService:       futuresService,
-		asset:                asset,
-		state:                RoundPending,
-		retryTransfers:       make(map[uint64]transferRetry),
-		retryTransferTickC:   make(chan time.Time, 1),
+		fundingIntervalStart: fundingIntervalStart,
+		fundingIntervalEnd:   fundingIntervalEnd,
 		fundingFeeRecords:    make(map[int64]FundingFee),
+
+		spotWorker:    spotTwap,
+		futuresWorker: futuresTwap,
+
+		futuresService: futuresService,
+		asset:          asset,
+
+		state:              RoundPending,
+		retryTransfers:     make(map[uint64]transferRetry),
+		retryTransferTickC: make(chan time.Time, 1),
 	}
 }
 
@@ -103,10 +110,9 @@ func (r *ArbitrageRound) IsClosable(currentTime time.Time) bool {
 		return false
 	}
 	intervalDuration := time.Duration(r.fundingIntervalHours) * time.Hour
-	intervalStart := r.startTime.Truncate(intervalDuration)
 	lastIntervalEnd := currentTime.Truncate(intervalDuration)
-	numIntervalPassed := int(lastIntervalEnd.Sub(intervalStart) / intervalDuration)
-	return numIntervalPassed > r.minHoldingIntervals
+	numIntervalPassed := int(lastIntervalEnd.Sub(r.fundingIntervalStart) / intervalDuration)
+	return numIntervalPassed >= r.minHoldingIntervals
 }
 
 func (r *ArbitrageRound) String() string {
@@ -232,6 +238,14 @@ func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime 
 
 func (r *ArbitrageRound) Start(ctx context.Context, currentTime time.Time) error {
 	if r.startTime.IsZero() {
+		if currentTime.After(r.fundingIntervalEnd) {
+			// the round is triggered after the funding interval -> error
+			return fmt.Errorf(
+				"the round is triggered after the funding interval end (%s): %s",
+				r.fundingIntervalEnd.Format(time.RFC3339),
+				currentTime.Format(time.RFC3339),
+			)
+		}
 		if err := r.spotWorker.Start(ctx, currentTime); err != nil {
 			return fmt.Errorf("failed to start spot worker: %w", err)
 		}

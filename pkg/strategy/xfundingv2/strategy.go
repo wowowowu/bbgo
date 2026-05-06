@@ -498,7 +498,7 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 				return
 			}
 			round := NewArbitrageRound(
-				selectedCandidate.LastFundingRate,
+				selectedCandidate.PremiumIndex,
 				selectedCandidate.MinHoldingIntervals,
 				selectedCandidate.FundingIntervalHours,
 				spotTwap,
@@ -692,7 +692,7 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 		Add(estimateExitCost.TotalFeeCost()).
 		Add(estimateExitCost.SpreadPnL)
 	amount := targetPosition.Abs().Mul(bestPrice)
-	estimateFundingFeePerInterval := amount.Mul(candidate.LastFundingRate.Abs())
+	estimateFundingFeePerInterval := amount.Mul(candidate.PremiumIndex.LastFundingRate.Abs())
 	if estimateFundingFeePerInterval.IsZero() {
 		return fixedpoint.Zero, nil
 	}
