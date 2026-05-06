@@ -40,6 +40,7 @@ type Strategy struct {
 	// IMPORTANT: xfundingv2 is now assuming trading on U-major pairs
 	CandidateSymbols     []string       `json:"candidateSymbols"`
 	OpenPositionInterval types.Duration `json:"openPositionInterval"`
+	TransitRoundInterval types.Duration `json:"transitRoundInterval"`
 
 	// TickSymbol is the symbol used for ticking the strategy, default to the first candidate symbol
 	TickSymbol string `json:"tickSymbol"`
@@ -100,6 +101,9 @@ func (s *Strategy) Defaults() error {
 	}
 	if s.OpenPositionInterval.Duration() == 0 {
 		s.OpenPositionInterval = types.Duration(time.Minute * 30)
+	}
+	if s.TransitRoundInterval.Duration() == 0 {
+		s.TransitRoundInterval = types.Duration(time.Minute * 10)
 	}
 
 	if s.MarketSelectionConfig == nil {
@@ -387,22 +391,34 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 }
 
 func (s *Strategy) transitRoundState(ctx context.Context, round *ArbitrageRound, currentTime time.Time) {
-	if !round.IsClosable(currentTime) {
+	// still in the first funding interval, do not transit
+	if round.NumHoldingIntervals(currentTime) <= 1 {
+		if round.LastUpdateTime().IsZero() {
+			round.SetUpdateTime(currentTime)
+		}
 		return
 	}
+	lastUpdateTime := round.LastUpdateTime()
+	if lastUpdateTime.IsZero() {
+		lastUpdateTime = currentTime
+		round.SetUpdateTime(currentTime)
+	}
+
+	if currentTime.Sub(lastUpdateTime) < s.TransitRoundInterval.Duration() {
+		return
+	}
+
 	switch round.State() {
-	case RoundOpening:
-		s.transitOpeningRound(ctx, round, currentTime)
-	case RoundReady:
-		s.transitReadyRound(ctx, round, currentTime)
+	case RoundOpening, RoundReady:
+		s.transitOpeningOrReadyRound(ctx, round, currentTime)
 	case RoundClosing:
 		s.transitClosingRound(ctx, round, currentTime)
 	}
+	round.SetUpdateTime(currentTime)
 }
 
-func (s *Strategy) transitOpeningRound(ctx context.Context, round *ArbitrageRound, currentTime time.Time) {
-	// the round is expired and is in opening state
-	// if the current funding rate is still favorable, keep opening, otherwise transit to closing
+func (s *Strategy) transitOpeningOrReadyRound(ctx context.Context, round *ArbitrageRound, currentTime time.Time) {
+	// if the current funding rate is still favorable, stay in current state, otherwise transit to closing
 	timedCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 
@@ -411,46 +427,43 @@ func (s *Strategy) transitOpeningRound(ctx context.Context, round *ArbitrageRoun
 		return
 	}
 
-	if getPostionSign(s.MarketSelectionConfig.FuturesDirection)*fundingRate.LastFundingRate.Sign() >= 0 {
-		// the funding rate is not favorable anymore, transit to closing
-		// short futures -> positive funding rate for funding income
-		// long futures -> negative funding rate for funding income
-		s.logger.Infof(
-			"[transitOpeningRound %s] transit to closing, current funding rate %s: %s",
-			currentTime.Format(time.RFC3339), fundingRate.LastFundingRate, round)
-		round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration)
-	} else if s.allowLog(currentTime) {
-		s.logger.Infof(
-			"[transitOpeningRound %s] round stays opening, current funding rate %s: %s",
-			currentTime.Format(time.RFC3339), fundingRate.LastFundingRate, round,
-		)
+	// the funding rate has flipped
+	if round.TriggeredFundingRate().Sign()*fundingRate.LastFundingRate.Sign() <= 0 {
+		if round.NumHoldingIntervals(currentTime) >= round.MinHoldingIntervals() {
+			// the min holding time has passed, transit to closing
+			s.logger.Infof(
+				"[transitOpeningOrReadyRound %s] min holding time passed, transit state %s -> closing, current funding rate %s: %s",
+				currentTime.Format(time.RFC3339), round.State(), fundingRate.LastFundingRate, round)
+			round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration)
+			return
+		}
+		// the funding rate is not favorable anymore, check the exit cost to see if it's worth to transit to closing
+		s.costEstimator.SetTargetPosition(round.TargetPosition())
+		spotOrderBook, spotOk := s.spotOrderBooks[round.SpotSymbol()]
+		futuresOrderBook, futuresOk := s.futuresOrderBooks[round.FuturesSymbol()]
+		if !spotOk || !futuresOk {
+			s.logger.Warnf("[transitOpeningOrReadyRound] order book not found for symbols: %s", round.SpotSymbol())
+			return
+		}
+		cost, err := s.costEstimator.EstimateExitCost(true, spotOrderBook.Copy(), futuresOrderBook.Copy())
+		if err != nil {
+			s.logger.WithError(err).Errorf("[transitOpeningOrReadyRound] failed to estimate exit cost: %s", round.SpotSymbol())
+			return
+		}
+		// the spread PnL is large enough to cover the exit cost, transit to closing
+		if cost.SpreadPnL.Compare(cost.TotalFeeCost()) > 0 {
+			s.logger.Infof(
+				"[transitOpeningOrReadyRound %s] transit state %s -> closing, current funding rate %s: %s",
+				currentTime.Format(time.RFC3339), round.State(), fundingRate.LastFundingRate, round)
+			round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration)
+			return
+		}
 	}
-}
 
-func (s *Strategy) transitReadyRound(ctx context.Context, round *ArbitrageRound, currentTime time.Time) {
-	// the round is expired and is in ready state
-	// if the current funding rate is still favorable, keep ready, otherwise transit to closing
-	timedCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-	defer cancel()
-
-	fundingRate, err := s.futuresService.QueryPremiumIndex(timedCtx, round.FuturesSymbol())
-	if err != nil {
-		return
-	}
-
-	if getPostionSign(s.MarketSelectionConfig.FuturesDirection)*fundingRate.LastFundingRate.Sign() >= 0 {
-		// the funding rate is not favorable anymore, transit to closing
-		// short futures -> positive funding rate for funding income
-		// long futures -> negative funding rate for funding income
+	if s.allowLog(currentTime) {
 		s.logger.Infof(
-			"[transitReadyRound %s] transit to closing, current funding rate %s: %s",
-			currentTime.Format(time.RFC3339), fundingRate.LastFundingRate, round,
-		)
-		round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration)
-	} else if s.allowLog(currentTime) {
-		s.logger.Infof(
-			"[transitReadyRound %s] round stays ready, current funding rate %s: %s",
-			currentTime.Format(time.RFC3339), fundingRate.LastFundingRate, round,
+			"[transitOpeningOrReadyRound %s] round stays %s, current funding rate %s: %s",
+			currentTime.Format(time.RFC3339), round.State(), fundingRate.LastFundingRate, round,
 		)
 	}
 }
