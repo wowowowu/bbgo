@@ -105,14 +105,26 @@ func (r *ArbitrageRound) StartTime() time.Time {
 	return r.startTime
 }
 
-func (r *ArbitrageRound) IsClosable(currentTime time.Time) bool {
+func (r *ArbitrageRound) TriggeredFundingRate() fixedpoint.Value {
+	return r.triggeredFundingRate
+}
+
+func (r *ArbitrageRound) NumHoldingIntervals(currentTime time.Time) int {
 	if r.startTime.IsZero() {
-		return false
+		return 0
 	}
+	// the funding rate has not flipped, check if the minimum holding time has passed
 	intervalDuration := time.Duration(r.fundingIntervalHours) * time.Hour
 	lastIntervalEnd := currentTime.Truncate(intervalDuration)
-	numIntervalPassed := int(lastIntervalEnd.Sub(r.fundingIntervalStart) / intervalDuration)
-	return numIntervalPassed >= r.minHoldingIntervals
+	return int(lastIntervalEnd.Sub(r.fundingIntervalStart) / intervalDuration)
+}
+
+func (r *ArbitrageRound) MinHoldingIntervals() int {
+	return r.minHoldingIntervals
+}
+
+func (r *ArbitrageRound) TargetPosition() fixedpoint.Value {
+	return r.spotWorker.TargetPosition()
 }
 
 func (r *ArbitrageRound) String() string {
