@@ -50,7 +50,8 @@ type Strategy struct {
 	TWAPWorkerConfig TWAPWorkerConfig `json:"twap"`
 
 	// Market selection criteria
-	MarketSelectionConfig *MarketSelectionConfig `json:"marketSelection,omitempty"`
+	MarketSelectionConfig *MarketSelectionConfig      `json:"marketSelection,omitempty"`
+	MaxPositionExposure   map[string]fixedpoint.Value `json:"maxPositionExposure"`
 
 	CheckInterval       time.Duration `json:"checkInterval"`
 	ClosePositionOnExit bool          `json:"closePositionOnExit"`
@@ -154,6 +155,9 @@ func (s *Strategy) Initialize() error {
 	if !bbgo.IsBackTesting {
 		s.logLimiter = rate.NewLimiter(rate.Every(time.Minute*10), 1)
 	}
+	if s.MaxPositionExposure == nil {
+		s.MaxPositionExposure = make(map[string]fixedpoint.Value)
+	}
 	s.activeRounds = make(map[string]*ArbitrageRound)
 	s.pendingRounds = make(map[string]*ArbitrageRound)
 	return nil
@@ -163,7 +167,11 @@ func (s *Strategy) Validate() error {
 	if len(s.CandidateSymbols) == 0 {
 		return errors.New("candidateSymbols is required")
 	}
-
+	for symbol, maxExposure := range s.MaxPositionExposure {
+		if maxExposure.Sign() < 0 {
+			return fmt.Errorf("maxPositionExposure should be positive: %s", symbol)
+		}
+	}
 	return nil
 }
 
@@ -663,10 +671,11 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *Mar
 			if !ok {
 				continue
 			}
+			tradeQuoteBalance := quoteBalance.Available.Mul(s.MarketSelectionConfig.TradeBalanceRatio)
 			// long spot -> trade on the sell side of the order book
 			sellBook := s.spotOrderBooks[candidate.Symbol].SideBook(types.SideTypeSell)
 			spotPrice := sellBook.AverageDepthPriceByQuote(quoteBalance.Available, 0)
-			targetSize := quoteBalance.Available.Div(spotPrice)
+			targetSize := tradeQuoteBalance.Div(spotPrice)
 			// short futures -> trade on the buy side of the order book
 			buyBook := s.futuresOrderBooks[candidate.Symbol].SideBook(types.SideTypeBuy)
 			futuresPrice := buyBook.AverageDepthPrice(targetSize)
@@ -682,7 +691,7 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *Mar
 			if !ok {
 				continue
 			}
-			targetSize := baseBalance.Available
+			targetSize := baseBalance.Available.Mul(s.MarketSelectionConfig.TradeBalanceRatio)
 			// long futures -> trade on the sell side of the order book
 			sellBook := s.futuresOrderBooks[candidate.Symbol].SideBook(types.SideTypeSell)
 			futuresPrice := sellBook.AverageDepthPrice(targetSize)
@@ -710,6 +719,13 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *Mar
 	targetPosition := targetFuturePositions[bestCandidate.Symbol]
 	if targetPosition.IsZero() {
 		return nil
+	}
+	if maxExposure, ok := s.MaxPositionExposure[bestCandidate.Symbol]; ok && targetPosition.Abs().Compare(maxExposure) > 0 {
+		if targetPosition.Sign() > 0 {
+			targetPosition = maxExposure
+		} else {
+			targetPosition = maxExposure.Neg()
+		}
 	}
 	// set the estimated min holding interval for the selected candidate
 	bestCandidate.MinHoldingIntervals = breakevenIntervals[bestCandidate.Symbol].Int()
