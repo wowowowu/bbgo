@@ -43,7 +43,9 @@ type Strategy struct {
 	TransitRoundInterval types.Duration `json:"transitRoundInterval"`
 
 	// TickSymbol is the symbol used for ticking the strategy, default to the first candidate symbol
-	TickSymbol string `json:"tickSymbol"`
+	TickSymbol    string `json:"tickSymbol"`
+	FeeSymbol     string `json:"feeSymbol"`
+	QuoteCurrency string `json:"quoteCurrency"`
 
 	TWAPWorkerConfig TWAPWorkerConfig `json:"twap"`
 
@@ -63,7 +65,8 @@ type Strategy struct {
 	costEstimator             *CostEstimator
 	preliminaryMarketSelector *MarketSelector
 
-	activeRounds map[string]*ArbitrageRound
+	pendingRounds map[string]*ArbitrageRound
+	activeRounds  map[string]*ArbitrageRound
 
 	coinmarketcapClient *coinmarketcap.DataSource
 
@@ -80,6 +83,8 @@ type Strategy struct {
 
 	logger     logrus.FieldLogger
 	logLimiter *rate.Limiter
+
+	lastTickTime time.Time
 }
 
 func (s *Strategy) ID() string {
@@ -110,6 +115,9 @@ func (s *Strategy) Defaults() error {
 		s.MarketSelectionConfig = &MarketSelectionConfig{}
 	}
 	s.MarketSelectionConfig.Defaults()
+	if s.QuoteCurrency == "" {
+		s.QuoteCurrency = "USDT"
+	}
 
 	return nil
 }
@@ -146,6 +154,8 @@ func (s *Strategy) Initialize() error {
 	if !bbgo.IsBackTesting {
 		s.logLimiter = rate.NewLimiter(rate.Every(time.Minute*10), 1)
 	}
+	s.activeRounds = make(map[string]*ArbitrageRound)
+	s.pendingRounds = make(map[string]*ArbitrageRound)
 	return nil
 }
 
@@ -230,7 +240,7 @@ func (s *Strategy) CrossRun(
 		return errors.New("no candidate symbols after filtering")
 	}
 
-	// setup the general order executors
+	// market checking and setup the general order executors
 	// NOTE: the executors should be created first before anything else to ensure the executors get updated first.
 	// The twap executors rely on the state of the general order executors to determine the filled quantity.
 	s.candidateSymbols = candidateSymbols
@@ -243,6 +253,16 @@ func (s *Strategy) CrossRun(
 		if !found {
 			return fmt.Errorf("market %s not found in futures session", symbol)
 		}
+		// check all symbols have the same quote currency
+		if spotMarket.QuoteCurrency != s.QuoteCurrency {
+			return fmt.Errorf("spot market %s quote currency %s does not match strategy quote currency %s",
+				symbol, spotMarket.QuoteCurrency, s.QuoteCurrency)
+		}
+		if futuresMarket.QuoteCurrency != s.QuoteCurrency {
+			return fmt.Errorf("futures market %s quote currency %s does not match strategy quote currency %s",
+				symbol, futuresMarket.QuoteCurrency, s.QuoteCurrency)
+		}
+
 		var spotPosition, futuresPosition *types.Position
 		if p, found := s.spotPositions[symbol]; found {
 			spotPosition = p
@@ -278,21 +298,6 @@ func (s *Strategy) CrossRun(
 		s.futuresGeneralOrderExecutors[symbol] = futuresExecutor
 	}
 
-	// subscribe BNB pairs for trading fee calculation
-	quoteCurrencies := make(map[string]struct{})
-	for _, symbol := range candidateSymbols {
-		market, ok := s.futuresSession.Market(symbol)
-		if !ok {
-			return fmt.Errorf("market %s not found in futures session", symbol)
-		}
-		quoteCurrencies[market.QuoteCurrency] = struct{}{}
-	}
-	for quoteCurrency := range quoteCurrencies {
-		bnbSymbol := fmt.Sprintf("BNB%s", quoteCurrency)
-		s.spotSession.Subscribe(types.KLineChannel, bnbSymbol, types.SubscribeOptions{Interval: types.Interval1m})
-		s.futuresSession.Subscribe(types.KLineChannel, bnbSymbol, types.SubscribeOptions{Interval: types.Interval1m})
-	}
-
 	// initialize depth books for model selection
 	// we create new stream here to save the bandwidth of the market data stream of the sessions
 	futureStream := s.futuresSession.Exchange.NewStream()
@@ -309,6 +314,13 @@ func (s *Strategy) CrossRun(
 		spotBook.BindStream(spotStream)
 		spotStream.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
 		s.spotOrderBooks[symbol] = spotBook
+	}
+	// subscribe fee symbol order book for trading fee estimation
+	if s.FeeSymbol != "" {
+		spotBook := types.NewStreamBook(s.FeeSymbol, s.spotSession.ExchangeName)
+		spotBook.BindStream(spotStream)
+		spotStream.Subscribe(types.BookChannel, s.FeeSymbol, types.SubscribeOptions{})
+		s.spotOrderBooks[s.FeeSymbol] = spotBook
 	}
 	if err := futureStream.Connect(ctx); err != nil {
 		return fmt.Errorf("failed to connect future stream books: %w", err)
@@ -364,6 +376,11 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if !s.lastTickTime.IsZero() && (s.lastTickTime.Equal(tickTime) || tickTime.Before(s.lastTickTime)) {
+		return
+	}
+	s.lastTickTime = tickTime
+
 	// start processing
 	// 1. check if there is any active round needs to be closed
 	// transit round states
@@ -382,7 +399,10 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 	// 2. check if new round can be opened or existing round needs to be adjusted
 	s.checkOpenNewRound(ctx, tickTime)
 
-	// tick existing active rounds
+	// 3. process pending rounds that are waiting for fee asset preparation
+	s.processPendingRounds(ctx, tickTime)
+
+	// 4. tick existing active rounds
 	for _, round := range s.activeRounds {
 		spotOrderBook := s.spotOrderBooks[round.spotWorker.Symbol()].Copy()
 		futuresOrderBook := s.futuresOrderBooks[round.futuresWorker.Symbol()].Copy()
@@ -477,6 +497,17 @@ func (s *Strategy) transitClosingRound(ctx context.Context, round *ArbitrageRoun
 }
 
 func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time) {
+	var lastOpenTime time.Time
+	for _, round := range s.activeRounds {
+		if lastOpenTime.IsZero() {
+			lastOpenTime = round.StartTime()
+		}
+	}
+	if !lastOpenTime.IsZero() && currentTime.Sub(lastOpenTime) < s.OpenPositionInterval.Duration() {
+		// still within the open position cooldown time, do not try to open new round
+		return
+	}
+
 	if len(s.activeRounds) == 0 {
 		// Only open new round when there is no active round
 		// TODO: support multiple active rounds for different symbols concurrently (e.g BTCUSDT and ETHUSDT)
@@ -493,6 +524,12 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 		selectedCandidate := s.selectMostPorfitableMarket(candidates)
 		if selectedCandidate == nil {
 			// no profitable candidate found, nothing to do
+			return
+		}
+		_, pending := s.pendingRounds[selectedCandidate.Symbol]
+		_, active := s.activeRounds[selectedCandidate.Symbol]
+		if pending || active {
+			// already has pending or active round for the symbol, skip
 			return
 		}
 		// open new round if the estimated break-even holding interval is within the max holding hours
@@ -523,7 +560,8 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 				s.logger.WithError(err).Errorf("failed to start arbitrage round: %s", selectedCandidate.Symbol)
 				return
 			}
-			s.activeRounds[selectedCandidate.Symbol] = round
+			// save as pending round for the fee asset preparation
+			s.pendingRounds[selectedCandidate.Symbol] = round
 		}
 	}
 }
