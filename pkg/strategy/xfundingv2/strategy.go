@@ -374,7 +374,7 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 	// remove closed active rounds
 	for _, round := range s.activeRounds {
 		if round.State() == RoundClosed {
-			s.handleRoundExit(ctx, round)
+			s.handleRoundExit(ctx, round, tickTime)
 		}
 		// TODO: insert closed round records into database
 	}
@@ -713,7 +713,7 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 	return breakEvenIntervals, nil
 }
 
-func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound) {
+func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound, tickTime time.Time) {
 	// stop the round
 	round.Stop()
 
@@ -742,4 +742,5 @@ func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound) {
 
 	s.logger.Infof("removing closed round: %s", round)
 	delete(s.activeRounds, round.SpotSymbol())
+	bbgo.Notify(round.PnL(ctx, tickTime))
 }

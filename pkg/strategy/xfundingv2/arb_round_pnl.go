@@ -2,19 +2,41 @@ package xfundingv2
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/style"
 	"github.com/c9s/bbgo/pkg/types"
+	"github.com/slack-go/slack"
 )
 
-// TODO: add slack notification support for RoundPnL
 type RoundPnL struct {
 	FundingIncome      fixedpoint.Value
 	SpotProfitStats    *types.ProfitStats
 	FuturesProfitStats *types.ProfitStats
 }
 
+func (p *RoundPnL) SlackAttachment() slack.Attachment {
+	totalNetPnL := p.FundingIncome.Add(
+		p.SpotProfitStats.AccumulatedNetProfit,
+	).Add(
+		p.FuturesProfitStats.AccumulatedNetProfit,
+	)
+	color := style.PnLColor(totalNetPnL)
+	return slack.Attachment{
+		Title: fmt.Sprintf("Arbitrage Round PnL: %s", p.SpotProfitStats.Symbol),
+		Color: color,
+		Fields: []slack.AttachmentField{
+			{Title: "Funding Income", Value: p.FundingIncome.String(), Short: true},
+			{Title: "Spot PnL", Value: p.SpotProfitStats.AccumulatedPnL.String(), Short: true},
+			{Title: "Spot Net PnL", Value: p.SpotProfitStats.AccumulatedNetProfit.String(), Short: true},
+			{Title: "Futures PnL", Value: p.FuturesProfitStats.AccumulatedPnL.String(), Short: true},
+			{Title: "Futures Net PnL", Value: p.FuturesProfitStats.AccumulatedNetProfit.String(), Short: true},
+			{Title: "Total Net PnL", Value: totalNetPnL.String(), Short: true},
+		},
+	}
+}
 func (r *ArbitrageRound) PnL(ctx context.Context, currentTime time.Time) RoundPnL {
 	r.mu.Lock()
 	defer r.mu.Unlock()
