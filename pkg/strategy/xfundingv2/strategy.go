@@ -497,6 +497,17 @@ func (s *Strategy) transitClosingRound(ctx context.Context, round *ArbitrageRoun
 }
 
 func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time) {
+	var lastOpenTime time.Time
+	for _, round := range s.activeRounds {
+		if lastOpenTime.IsZero() {
+			lastOpenTime = round.StartTime()
+		}
+	}
+	if !lastOpenTime.IsZero() && currentTime.Sub(lastOpenTime) < s.OpenPositionInterval.Duration() {
+		// still within the open position cooldown time, do not try to open new round
+		return
+	}
+
 	if len(s.activeRounds) == 0 {
 		// Only open new round when there is no active round
 		// TODO: support multiple active rounds for different symbols concurrently (e.g BTCUSDT and ETHUSDT)
