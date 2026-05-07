@@ -160,13 +160,16 @@ func (r *ArbitrageRound) String() string {
 }
 
 func (r *ArbitrageRound) CollectedFunding(ctx context.Context, currentTime time.Time) fixedpoint.Value {
-	if r.startTime.IsZero() {
-		return fixedpoint.Zero
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.startTime.IsZero() {
+		return fixedpoint.Zero
+	}
+	return r.collectedFunding(ctx, currentTime)
+}
+
+func (r *ArbitrageRound) collectedFunding(ctx context.Context, currentTime time.Time) fixedpoint.Value {
 	r.syncFundingFeeRecords(ctx, currentTime)
 
 	var totalFunding fixedpoint.Value
