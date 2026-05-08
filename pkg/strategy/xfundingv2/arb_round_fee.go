@@ -10,30 +10,63 @@ import (
 	"github.com/c9s/bbgo/pkg/types"
 )
 
+type PendingRound struct {
+	Round         *ArbitrageRound
+	RetryCount    int
+	LastRetryTime time.Time
+}
+
 func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Time) {
-	var pendingRounds []*ArbitrageRound
-	for _, round := range s.pendingRounds {
+	var pendingRounds []*PendingRound
+	for _, pendingRound := range s.pendingRounds {
 		// moving round out from the pending list
-		delete(s.pendingRounds, round.SpotSymbol())
-		pendingRounds = append(pendingRounds, round)
-	}
-	var processedRounds []*ArbitrageRound
-	for _, round := range pendingRounds {
-		// calculate the fee asset required for the round
-		if err := s.calculateRoundFeeAsset(round); err != nil {
-			s.logger.WithError(err).Errorf(
-				"failed to prepare fee asset for round: %s",
-				round,
-			)
+		if pendingRound.RetryCount >= s.MaxPendingRoundRetry {
+			delete(s.pendingRounds, pendingRound.Round.SpotSymbol())
 			continue
 		}
-		processedRounds = append(processedRounds, round)
+		// the pending round is over the grace period, it is ready for another retry
+		if pendingRound.LastRetryTime.IsZero() || currentTime.Sub(pendingRound.LastRetryTime) >= s.PendingRoundGracePeriod.Duration() {
+			pendingRounds = append(pendingRounds, pendingRound)
+		}
 	}
-	if err := s.acquireFeeAssetAndTransfer(ctx, processedRounds); err != nil {
-		s.logger.WithError(err).Error("failed to acquire fee asset and transfer for pending rounds")
-		return
+	var processedRounds []*ArbitrageRound
+	if s.FeeSymbol != "" {
+		// prepare fee asset for the pending rounds
+		for _, pendingRound := range pendingRounds {
+			// calculate the fee asset required for the round
+			if err := s.calculateRoundFeeAsset(pendingRound.Round); err != nil {
+				s.logger.WithError(err).Errorf(
+					"failed to prepare fee asset for round: %s",
+					pendingRound.Round,
+				)
+				pendingRound.RetryCount++
+				pendingRound.LastRetryTime = currentTime
+				continue
+			}
+			processedRounds = append(processedRounds, pendingRound.Round)
+		}
+		// include the active rounds into fee asset preparation
+		var activeRounds []*ArbitrageRound
+		for _, activeRound := range s.activeRounds {
+			activeRounds = append(activeRounds, activeRound)
+		}
+		allRounds := append(processedRounds, activeRounds...)
+		if err := s.acquireFeeAssetAndTransfer(ctx, allRounds); err != nil {
+			s.logger.WithError(err).Error("failed to acquire fee asset and transfer for pending rounds")
+			for _, pendingRound := range pendingRounds {
+				pendingRound.RetryCount++
+				pendingRound.LastRetryTime = currentTime
+			}
+			return
+		}
+	} else {
+		// fee asset is not required, adding all pending rounds to the next step
+		for _, pendingRound := range pendingRounds {
+			processedRounds = append(processedRounds, pendingRound.Round)
+		}
 	}
 
+	// start the processed rounds and move them to active round list
 	for _, round := range processedRounds {
 		if err := round.Start(ctx, currentTime); err != nil {
 			s.logger.WithError(err).Errorf(
@@ -42,7 +75,9 @@ func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Ti
 			)
 			continue
 		}
+		// move to active round list
 		s.activeRounds[round.SpotSymbol()] = round
+		delete(s.pendingRounds, round.SpotSymbol())
 		s.logger.Infof("round started: %s", round)
 	}
 }
