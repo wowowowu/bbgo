@@ -113,7 +113,8 @@ func TestStrategy_AquireFeeAssetAndTransfer(t *testing.T) {
 
 	t.Run("both accounts have sufficient fee asset", func(t *testing.T) {
 		// Spot needs 0.5 BNB, has 1.0 BNB; Futures needs 0.3 BNB, has 1.0 BNB
-		s, _, mockService := setup(Number(1.0), Number(1.0))
+		s, mockExchange, mockService := setup(Number(1.0), Number(1.0))
+		mockExchange.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).Times(0)
 		rounds := makeRounds(Number(0.5), Number(0.3))
 
 		ctx := context.Background()
@@ -156,7 +157,8 @@ func TestStrategy_AquireFeeAssetAndTransfer(t *testing.T) {
 		// spotDeficit = 0.5 - 2.0 = -1.5, futuresDeficit = 1.0 - 0.3 = 0.7
 		// total = -1.5 + 0.7 = -0.8 < 0 → no buy needed
 		// futuresDeficit > 0 → transfer 0.7 in (spot → futures)
-		s, _, mockService := setup(Number(2.0), Number(0.3))
+		s, mockExchange, mockService := setup(Number(2.0), Number(0.3))
+		mockExchange.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).Times(0)
 		rounds := makeRounds(Number(0.5), Number(1.0))
 
 		ctx := context.Background()
@@ -201,7 +203,8 @@ func TestStrategy_AquireFeeAssetAndTransfer(t *testing.T) {
 		// spotDeficit = 1.0 - 0.4 = 0.6, futuresDeficit = 0.3 - 2.0 = -1.7
 		// total = 0.6 + (-1.7) = -1.1 < 0 → no buy needed
 		// spotDeficit > 0 → transfer 0.6 out (futures → spot)
-		s, _, mockService := setup(Number(0.4), Number(2.0))
+		s, mockExchange, mockService := setup(Number(0.4), Number(2.0))
+		mockExchange.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).Times(0)
 		rounds := makeRounds(Number(1.0), Number(0.3))
 
 		ctx := context.Background()
