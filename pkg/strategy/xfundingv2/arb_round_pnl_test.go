@@ -32,11 +32,11 @@ func TestArbitrageRound_TradePnL(t *testing.T) {
 
 	t.Run("returns zero profit when position is only opened", func(t *testing.T) {
 		// Add orders first so AddTrade accepts them
-		spotExecutor := round.spotWorker.Executor()
-		spotExecutor.orders[1] = types.OrderQuery{OrderID: "1"}
+		spotExecutor := round.syncState.SpotWorker.Executor()
+		spotExecutor.syncState.Orders[1] = types.OrderQuery{OrderID: "1"}
 
-		futuresExecutor := round.futuresWorker.Executor()
-		futuresExecutor.orders[2] = types.OrderQuery{OrderID: "2"}
+		futuresExecutor := round.syncState.FuturesWorker.Executor()
+		futuresExecutor.syncState.Orders[2] = types.OrderQuery{OrderID: "2"}
 
 		// Opening trades: buy spot at 40000, sell futures at 40100
 		spotExecutor.AddTrade(types.Trade{
@@ -73,11 +73,11 @@ func TestArbitrageRound_TradePnL(t *testing.T) {
 	})
 
 	t.Run("calculates realized profit after closing trades", func(t *testing.T) {
-		spotExecutor := round.spotWorker.Executor()
-		spotExecutor.orders[3] = types.OrderQuery{OrderID: "3"}
+		spotExecutor := round.syncState.SpotWorker.Executor()
+		spotExecutor.syncState.Orders[3] = types.OrderQuery{OrderID: "3"}
 
-		futuresExecutor := round.futuresWorker.Executor()
-		futuresExecutor.orders[4] = types.OrderQuery{OrderID: "4"}
+		futuresExecutor := round.syncState.FuturesWorker.Executor()
+		futuresExecutor.syncState.Orders[4] = types.OrderQuery{OrderID: "4"}
 
 		// Closing trades: sell spot at 41000 (profit), buy futures at 39900 (profit)
 		spotExecutor.AddTrade(types.Trade{

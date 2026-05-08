@@ -43,8 +43,8 @@ func (r *ArbitrageRound) PnL(ctx context.Context, currentTime time.Time) RoundPn
 
 	fundingIncome := r.collectedFunding(ctx, currentTime)
 
-	spotMarket := r.spotWorker.Market()
-	futuresMarket := r.futuresWorker.Market()
+	spotMarket := r.syncState.SpotWorker.Market()
+	futuresMarket := r.syncState.FuturesWorker.Market()
 
 	spotPosition := types.NewPositionFromMarket(spotMarket)
 	futuresPosition := types.NewPositionFromMarket(futuresMarket)
@@ -54,19 +54,19 @@ func (r *ArbitrageRound) PnL(ctx context.Context, currentTime time.Time) RoundPn
 	if r.futuresExchangeFeeRates != nil {
 		futuresPosition.ExchangeFeeRates = r.futuresExchangeFeeRates
 	}
-	if !r.avgFeeCost.IsZero() {
+	if !r.syncState.AvgFeeCost.IsZero() {
 		spotPosition.FeeAverageCosts = map[string]fixedpoint.Value{
-			r.feeSymbol: r.avgFeeCost,
+			r.syncState.FeeSymbol: r.syncState.AvgFeeCost,
 		}
 		futuresPosition.FeeAverageCosts = map[string]fixedpoint.Value{
-			r.feeSymbol: r.avgFeeCost,
+			r.syncState.FeeSymbol: r.syncState.AvgFeeCost,
 		}
 	}
 
 	spotProfitStats := types.NewProfitStats(spotMarket)
 	futuresProfitStats := types.NewProfitStats(futuresMarket)
 
-	spotTrades := r.spotWorker.Executor().AllTrades()
+	spotTrades := r.syncState.SpotWorker.Executor().AllTrades()
 	for _, trade := range spotTrades {
 		profit, netProfit, madeProfit := spotPosition.AddTrade(trade)
 		if madeProfit {
@@ -75,7 +75,7 @@ func (r *ArbitrageRound) PnL(ctx context.Context, currentTime time.Time) RoundPn
 		}
 	}
 
-	futuresTrades := r.futuresWorker.Executor().AllTrades()
+	futuresTrades := r.syncState.FuturesWorker.Executor().AllTrades()
 	for _, trade := range futuresTrades {
 		profit, netProfit, madeProfit := futuresPosition.AddTrade(trade)
 		if madeProfit {
