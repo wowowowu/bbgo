@@ -1891,7 +1891,7 @@ func (s *Strategy) cancelSpreadMakerOrderAndReturnCoveredPos(
 
 	finalOrder, err := s.SpreadMaker.cancelAndQueryOrder(ctx)
 	if err != nil {
-		s.logger.WithError(err).Errorf("spread maker: cancel order error")
+		s.logger.WithError(err).Errorf("spreadMaker: cancel order error")
 		return fixedpoint.Zero
 	}
 
@@ -3078,7 +3078,7 @@ func (s *Strategy) gracefulShutDown(shutdownCtx context.Context) {
 		if err != nil {
 			s.logger.WithError(err).Errorf("unable to cancel spread maker orders")
 		} else if makerOrder != nil {
-			s.logger.Infof("spread maker orders are cancelled, current position: %s", s.Position)
+			s.logger.Infof("spreadMaker orders are cancelled, current position: %s", s.Position)
 		}
 	}
 
