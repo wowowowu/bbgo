@@ -39,9 +39,9 @@ type OrderBookBestPriceVolumeSignal struct {
 	MinQuoteVolume fixedpoint.Value `json:"minQuoteVolume"`
 	MinDelta       fixedpoint.Value `json:"minDelta"`
 
-	Window          int    `json:"window"`
-	SmoothingWindow int    `json:"smoothingWindow"`
-	SmoothingType   string `json:"smoothingType"`
+	Window          int                       `json:"window"`
+	SmoothingWindow int                       `json:"smoothingWindow"`
+	SmoothingType   indicatorv2.SmoothingType `json:"smoothingType"`
 
 	symbol string
 	book   *types.StreamOrderBook
@@ -71,28 +71,13 @@ func (s *OrderBookBestPriceVolumeSignal) Bind(ctx context.Context, session *bbgo
 
 	if s.Window > 0 {
 		s.bidVolumeSeries = types.NewFloat64Series()
-		s.bidVolumeIndicator = s.createVolumeIndicator(s.bidVolumeSeries)
+		s.bidVolumeIndicator = indicatorv2.NewSmoothedIndicator(s.bidVolumeSeries, s.Window, s.SmoothingWindow, s.SmoothingType)
 
 		s.askVolumeSeries = types.NewFloat64Series()
-		s.askVolumeIndicator = s.createVolumeIndicator(s.askVolumeSeries)
+		s.askVolumeIndicator = indicatorv2.NewSmoothedIndicator(s.askVolumeSeries, s.Window, s.SmoothingWindow, s.SmoothingType)
 	}
 
 	return nil
-}
-
-func (s *OrderBookBestPriceVolumeSignal) createVolumeIndicator(source types.Float64Source) types.Float64Calculator {
-	maxStream := indicatorv2.MAX(source, s.Window)
-	if s.SmoothingWindow > 0 {
-		switch s.SmoothingType {
-		case "rma":
-			return indicatorv2.RMA2(maxStream, s.SmoothingWindow, true)
-		case "ewma", "ema":
-			return indicatorv2.EWMA2(maxStream, s.SmoothingWindow)
-		default:
-			return indicatorv2.EWMA2(maxStream, s.SmoothingWindow)
-		}
-	}
-	return maxStream
 }
 
 func (s *OrderBookBestPriceVolumeSignal) CalculateSignal(ctx context.Context) (float64, error) {
