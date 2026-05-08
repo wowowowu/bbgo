@@ -68,15 +68,15 @@ type Strategy struct {
 	costEstimator             *CostEstimator
 	preliminaryMarketSelector *MarketSelector
 
-	pendingRounds map[string]*PendingRound
-	activeRounds  map[string]*ArbitrageRound
-
 	coinmarketcapClient *coinmarketcap.DataSource
 
-	// persist the positions
+	// persistence states
+	// pending rounds and active rounds
+	pendingRounds map[string]*PendingRound   `persistence:"pendingRounds"`
+	activeRounds  map[string]*ArbitrageRound `persistence:"activeRounds"`
 	// the positions are shared across rounds and the executors of the same symbol.
-	spotPositions    map[string]*types.Position `persistence:"spot_positions"`
-	futuresPositions map[string]*types.Position `persistence:"futures_positions"`
+	spotPositions    map[string]*types.Position `persistence:"spotPositions,omitempty"`
+	futuresPositions map[string]*types.Position `persistence:"futuresPositions,omitempty"`
 
 	// order executors for each symbol
 	// we need to cache the executors as map at startup since the executors are bound to the user data stream (via `.Bind()`).
@@ -146,29 +146,15 @@ func (s *Strategy) Initialize() error {
 	s.futuresOrderBooks = make(map[string]*types.StreamOrderBook)
 	s.spotOrderBooks = make(map[string]*types.StreamOrderBook)
 
-	// Initialize position maps (may be populated by LoadState if persisted state exists)
-	if s.spotPositions == nil {
-		s.spotPositions = make(map[string]*types.Position)
-	}
-	if s.futuresPositions == nil {
-		s.futuresPositions = make(map[string]*types.Position)
-	}
-
 	// Initialize executor maps
-	if s.spotGeneralOrderExecutors == nil {
-		s.spotGeneralOrderExecutors = make(map[string]*bbgo.GeneralOrderExecutor)
-	}
-	if s.futuresGeneralOrderExecutors == nil {
-		s.futuresGeneralOrderExecutors = make(map[string]*bbgo.GeneralOrderExecutor)
-	}
+	s.spotGeneralOrderExecutors = make(map[string]*bbgo.GeneralOrderExecutor)
+	s.futuresGeneralOrderExecutors = make(map[string]*bbgo.GeneralOrderExecutor)
 	if !bbgo.IsBackTesting {
 		s.logLimiter = rate.NewLimiter(rate.Every(time.Minute*10), 1)
 	}
 	if s.MaxPositionExposure == nil {
 		s.MaxPositionExposure = make(map[string]fixedpoint.Value)
 	}
-	s.activeRounds = make(map[string]*ArbitrageRound)
-	s.pendingRounds = make(map[string]*PendingRound)
 	return nil
 }
 
@@ -202,8 +188,24 @@ func (s *Strategy) CrossSubscribe(sessions map[string]*bbgo.ExchangeSession) {
 }
 
 func (s *Strategy) CrossRun(
-	ctx context.Context, orderExecutionRouter bbgo.OrderExecutionRouter, sessions map[string]*bbgo.ExchangeSession,
+	ctx context.Context, _ bbgo.OrderExecutionRouter, sessions map[string]*bbgo.ExchangeSession,
 ) error {
+	// Initialize position maps (may be populated by LoadState if persisted state exists)
+	if s.spotPositions == nil {
+		s.spotPositions = make(map[string]*types.Position)
+	}
+	if s.futuresPositions == nil {
+		s.futuresPositions = make(map[string]*types.Position)
+	}
+
+	// Initialize round maps (may be populated by LoadState if persisted state exists)
+	if s.activeRounds == nil {
+		s.activeRounds = make(map[string]*ArbitrageRound)
+	}
+	if s.pendingRounds == nil {
+		s.pendingRounds = make(map[string]*PendingRound)
+	}
+
 	s.spotSession = sessions[s.SpotSession]
 	s.futuresSession = sessions[s.FuturesSession]
 
@@ -377,6 +379,19 @@ func (s *Strategy) CrossRun(
 	binanceEx, _ := s.futuresSession.Exchange.(*binance.Exchange)
 	s.preliminaryMarketSelector = NewMarketSelector(*s.MarketSelectionConfig, binanceEx, s.logger)
 
+	// runtime init done, load pending and active rounds
+	for symbol, pendingRound := range s.pendingRounds {
+		if err := pendingRound.LoadStrategy(ctx, s); err != nil {
+			return fmt.Errorf("failed to restore pending round (%s): %w", symbol, err)
+		}
+	}
+	for symbol, activeRound := range s.activeRounds {
+		if err := activeRound.LoadStrategy(ctx, s); err != nil {
+			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
+		}
+	}
+
+	// setup callbacks
 	for _, sess := range []*bbgo.ExchangeSession{s.spotSession, s.futuresSession} {
 		sess.MarketDataStream.OnKLineClosed(types.KLineWith(s.TickSymbol, types.Interval1m, func(kline types.KLine) {
 			s.tick(ctx, kline.EndTime.Time())
@@ -449,8 +464,8 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 
 	// 4. tick existing active rounds
 	for _, round := range s.activeRounds {
-		spotOrderBook := s.spotOrderBooks[round.spotWorker.Symbol()].Copy()
-		futuresOrderBook := s.futuresOrderBooks[round.futuresWorker.Symbol()].Copy()
+		spotOrderBook := s.spotOrderBooks[round.SpotSymbol()].Copy()
+		futuresOrderBook := s.futuresOrderBooks[round.FuturesSymbol()].Copy()
 		round.Tick(tickTime, spotOrderBook, futuresOrderBook)
 	}
 }
@@ -544,8 +559,13 @@ func (s *Strategy) transitClosingRound(ctx context.Context, round *ArbitrageRoun
 func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time) {
 	var lastOpenTime time.Time
 	for _, round := range s.activeRounds {
+		startTime := round.StartTime()
 		if lastOpenTime.IsZero() {
-			lastOpenTime = round.StartTime()
+			lastOpenTime = startTime
+			continue
+		}
+		if startTime.After(lastOpenTime) {
+			lastOpenTime = startTime
 		}
 	}
 	if !lastOpenTime.IsZero() && currentTime.Sub(lastOpenTime) < s.OpenPositionInterval.Duration() {
@@ -553,9 +573,9 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 		return
 	}
 
+	// Only open new round when there is no active round
+	// TODO: support multiple active rounds for different symbols concurrently (e.g BTCUSDT and ETHUSDT)
 	if len(s.activeRounds) == 0 {
-		// Only open new round when there is no active round
-		// TODO: support multiple active rounds for different symbols concurrently (e.g BTCUSDT and ETHUSDT)
 		candidates, err := s.preliminaryMarketSelector.SelectMarkets(ctx, s.candidateSymbols)
 		if err != nil {
 			s.logger.WithError(err).Error("failed to select market candidates")
@@ -581,14 +601,14 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 		if selectedCandidate.MinHoldingDuration <= s.MarketSelectionConfig.MaxHoldingHours.Duration() {
 			spotExecutor := s.spotGeneralOrderExecutors[selectedCandidate.Symbol]
 			spotTwap, err := NewTWAPWorker(ctx, selectedCandidate.Symbol, s.spotSession, spotExecutor, s.TWAPWorkerConfig)
-			if err != nil {
+			if err != nil || spotTwap == nil {
 				s.logger.WithError(err).Errorf("failed to create TWAP worker for spot %s", selectedCandidate.Symbol)
 				return
 			}
 			spotTwap.SetTargetPosition(selectedCandidate.TargetFuturesPosition.Neg())
 			futuresExecutor := s.futuresGeneralOrderExecutors[selectedCandidate.Symbol]
 			futuresTwap, err := NewTWAPWorker(ctx, selectedCandidate.Symbol, s.futuresSession, futuresExecutor, s.TWAPWorkerConfig)
-			if err != nil {
+			if err != nil || futuresTwap == nil {
 				s.logger.WithError(err).Errorf("failed to create TWAP worker for futures %s", selectedCandidate.Symbol)
 				return
 			}
@@ -827,10 +847,10 @@ func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound, t
 	switch s.MarketSelectionConfig.FuturesDirection {
 	case types.PositionShort:
 		// short futures -> transfer base currency
-		asset = round.futuresWorker.Market().BaseCurrency
+		asset = round.FuturesMarket().BaseCurrency
 	case types.PositionLong:
 		// long futures -> transfer quote currency
-		asset = round.futuresWorker.Market().QuoteCurrency
+		asset = round.FuturesMarket().QuoteCurrency
 	}
 	account := s.futuresSession.GetAccount()
 	balance, ok := account.Balance(asset)
