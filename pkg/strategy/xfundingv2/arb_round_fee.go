@@ -85,8 +85,9 @@ func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Ti
 func (s *Strategy) acquireFeeAssetAndTransfer(ctx context.Context, rounds []*ArbitrageRound) error {
 	var requiredSpotFeeAmount, requiredFuturesFeeAmount fixedpoint.Value
 	for _, round := range rounds {
-		requiredSpotFeeAmount = requiredSpotFeeAmount.Add(round.SpotFeeAssetAmount())
-		requiredFuturesFeeAmount = requiredFuturesFeeAmount.Add(round.FuturesFeeAssetAmount())
+		roundSpotFee, roundFuturesFee := round.RequiredFeeAssetAmounts()
+		requiredSpotFeeAmount = requiredSpotFeeAmount.Add(roundSpotFee)
+		requiredFuturesFeeAmount = requiredFuturesFeeAmount.Add(roundFuturesFee)
 	}
 	spotAccount := s.spotSession.GetAccount()
 	futuresAccount := s.futuresSession.GetAccount()
@@ -137,6 +138,10 @@ func (s *Strategy) acquireFeeAssetAndTransfer(ctx context.Context, rounds []*Arb
 }
 
 func (s *Strategy) calculateRoundFeeAsset(round *ArbitrageRound) error {
+	if !round.SpotFeeAssetAmount().IsZero() || !round.FuturesFeeAssetAmount().IsZero() {
+		// already calculated, no need to calculate again
+		return nil
+	}
 	feeOrderBook, ok := s.spotOrderBooks[s.FeeSymbol]
 	if !ok {
 		return nil
@@ -180,6 +185,10 @@ func (s *Strategy) calculateRoundFeeAsset(round *ArbitrageRound) error {
 	feeAssetPrice := feeSellBook.AverageDepthPriceByQuote(totalFeeInQuote, 0)
 	spotFeeAmount = spotFeeInQuote.Div(feeAssetPrice)
 	futuresFeeAmount = futuresFeeInQuote.Div(feeAssetPrice)
+
+	// multiply by 2 -> for entry and exit
+	spotFeeAmount = spotFeeAmount.Mul(fixedpoint.Two)
+	futuresFeeAmount = futuresFeeAmount.Mul(fixedpoint.Two)
 
 	round.SetSpotFeeAssetAmount(spotFeeAmount)
 	round.SetFuturesFeeAssetAmount(futuresFeeAmount)
