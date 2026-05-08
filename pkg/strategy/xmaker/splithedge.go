@@ -246,6 +246,11 @@ func (h *SplitHedge) hedgeWithProportionAlgo(
 			continue
 		}
 
+		if hedgeMarket.session.IsInMaintenance() {
+			h.logger.Warnf("splitHedge: hedge market %s is in maintenance, skipping", proportionMarket.Name)
+			continue
+		}
+
 		canHedge, maxQuantity, err := hedgeMarket.canHedge(ctx, uncoveredPosition)
 		if err != nil {
 			h.logger.WithError(err).Errorf("splitHedge: hedge market checking canHedge failed")
@@ -325,6 +330,11 @@ func (h *SplitHedge) hedgeWithBestPriceAlgo(
 	var bestMarket *HedgeMarket
 
 	for _, mkt := range h.hedgeMarketInstances {
+		if mkt.session.IsInMaintenance() {
+			h.logger.Warnf("splitHedge: hedge market %s is in maintenance, skipping", mkt.InstanceID())
+			continue
+		}
+
 		mktBid, mktAsk := mkt.GetQuotePrice()
 		mktPrice := sideTakerPrice(mktBid, mktAsk, orderSide)
 
@@ -482,6 +492,11 @@ func (h *SplitHedge) GetBalanceWeightedQuotePrice() (bid, ask fixedpoint.Value, 
 	sumQuoteWeight := fixedpoint.Zero
 
 	for name, mkt := range h.hedgeMarketInstances {
+		if mkt.session.IsInMaintenance() {
+			h.logger.Warnf("splitHedge: hedge market %s is in maintenance, skipping weighting", name)
+			continue
+		}
+
 		baseAvail, quoteAvail := mkt.GetBaseQuoteAvailableBalances()
 
 		// Skip markets that have no book-derived prices (but still allow zero balances to contribute zero weight)
