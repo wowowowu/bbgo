@@ -27,6 +27,8 @@ type MarketSelectionConfig struct {
 	FuturesDirection types.PositionType `json:"futuresDirection"`
 
 	MaxHoldingHours types.Duration `json:"maxHoldingHours"`
+	// TradeBalanceRatio is the ratio of the asset balance to be invested on the spot market.
+	TradeBalanceRatio fixedpoint.Value `json:"tradeBalanceRatio"`
 
 	// Minimum annualized funding rate to consider (e.g., 0.10 = 10%)
 	// recommended to default to 5%
@@ -52,6 +54,9 @@ func (c *MarketSelectionConfig) Defaults() {
 	}
 	if c.MaxHoldingHours == 0 {
 		c.MaxHoldingHours = types.Duration(time.Hour * 48)
+	}
+	if c.TradeBalanceRatio.IsZero() {
+		c.TradeBalanceRatio = fixedpoint.NewFromFloat(0.999)
 	}
 	if c.MinAnnualizedRate.IsZero() {
 		c.MinAnnualizedRate = fixedpoint.NewFromFloat(0.05) // 5%
