@@ -59,27 +59,9 @@ type TWAPWorker struct {
 	// filledQuantity, activeOrder, trades, state
 	mu sync.Mutex
 
-	config TWAPWorkerConfig
+	syncState TWAPWorkerSyncState
 
-	targetPosition fixedpoint.Value // positive = buy/long, negative = sell/short
-
-	// state
-	state     TWAPWorkerState
-	startTime time.Time
-	endTime   time.Time
-
-	placeOrderInterval   time.Duration
-	currentIntervalStart time.Time
-	currentIntervalEnd   time.Time
-	lastCheckTime        time.Time
-
-	symbol string
-
-	ctx context.Context
-
-	activeOrder  *types.Order
-	twapExecutor *TWAPExecutor
-
+	ctx    context.Context
 	logger logrus.FieldLogger
 }
 
@@ -99,15 +81,18 @@ func NewTWAPWorker(
 		return nil, fmt.Errorf("exchange does not support OrderQueryService: %s", session.Exchange.Name())
 	}
 	w := &TWAPWorker{
-		config:         config,
-		symbol:         symbol,
-		state:          TWAPWorkerStatePending,
-		targetPosition: fixedpoint.Zero,
+		syncState: TWAPWorkerSyncState{
+			Symbol:         symbol,
+			Config:         config,
+			State:          TWAPWorkerStatePending,
+			TargetPosition: fixedpoint.Zero,
+		},
 	}
 	w.ctx = ctx
-	w.twapExecutor = NewTWAPOrderExecutor(
+	w.syncState.TWAPExecutor = NewTWAPExecutor(
 		w.ctx,
 		service,
+		session.Futures,
 		market,
 		generalExecutor,
 		config,
@@ -117,7 +102,7 @@ func NewTWAPWorker(
 
 // SetTargetPosition sets the target position for the TWAP worker.
 func (w *TWAPWorker) SetTargetPosition(targetPosition fixedpoint.Value) {
-	w.targetPosition = targetPosition
+	w.syncState.TargetPosition = targetPosition
 }
 
 func (w *TWAPWorker) SetLogger(logger logrus.FieldLogger) {
@@ -125,36 +110,36 @@ func (w *TWAPWorker) SetLogger(logger logrus.FieldLogger) {
 }
 
 func (w *TWAPWorker) Symbol() string {
-	return w.symbol
+	return w.syncState.Symbol
 }
 
 func (w *TWAPWorker) Market() types.Market {
-	return w.twapExecutor.market
+	return w.syncState.TWAPExecutor.Market()
 }
 
 func (w *TWAPWorker) Executor() *TWAPExecutor {
-	return w.twapExecutor
+	return w.syncState.TWAPExecutor
 }
 
 func (w *TWAPWorker) State() TWAPWorkerState {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return w.state
+	return w.syncState.State
 }
 
 func (w *TWAPWorker) IsDone() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return w.state == TWAPWorkerStateDone
+	return w.syncState.State == TWAPWorkerStateDone
 }
 
 func (w *TWAPWorker) AveragePrice() fixedpoint.Value {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	trades := w.twapExecutor.AllTrades()
+	trades := w.syncState.TWAPExecutor.AllTrades()
 	return tradingutil.AveragePriceFromTrades(trades)
 }
 
@@ -170,11 +155,11 @@ func (w *TWAPWorker) AddTrade(trade types.Trade) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	w.twapExecutor.AddTrade(trade)
+	w.syncState.TWAPExecutor.AddTrade(trade)
 }
 
 func (w *TWAPWorker) filledPosition() fixedpoint.Value {
-	trades := w.twapExecutor.AllTrades()
+	trades := w.syncState.TWAPExecutor.AllTrades()
 	position := fixedpoint.Zero
 	for _, t := range trades {
 		if t.Side == types.SideTypeBuy {
@@ -190,7 +175,7 @@ func (w *TWAPWorker) TotalFee() map[string]fixedpoint.Value {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	trades := w.twapExecutor.AllTrades()
+	trades := w.syncState.TWAPExecutor.AllTrades()
 	feeMap := make(map[string]fixedpoint.Value)
 	for _, t := range trades {
 		if t.FeeCurrency == "" || t.Fee.IsZero() {
@@ -205,7 +190,7 @@ func (w *TWAPWorker) ActiveOrder() *types.Order {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return w.activeOrder
+	return w.syncState.ActiveOrder
 }
 
 func (w *TWAPWorker) RemainingQuantity() fixedpoint.Value {
@@ -218,14 +203,14 @@ func (w *TWAPWorker) RemainingQuantity() fixedpoint.Value {
 func (w *TWAPWorker) remainingQuantity() fixedpoint.Value {
 	// remaining = target - filled
 	// NOTE: the remaining quantity can be positive or negative.
-	return w.targetPosition.Sub(w.filledPosition())
+	return w.syncState.TargetPosition.Sub(w.filledPosition())
 }
 
 func (w *TWAPWorker) TargetPosition() fixedpoint.Value {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return w.targetPosition
+	return w.syncState.TargetPosition
 }
 
 func (w *TWAPWorker) Start(ctx context.Context, currentTime time.Time) error {
@@ -233,28 +218,28 @@ func (w *TWAPWorker) Start(ctx context.Context, currentTime time.Time) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.state != TWAPWorkerStatePending {
-		return fmt.Errorf("cannot start TWAPWorker: expected state Pending, got %s", w.state)
+	if w.syncState.State != TWAPWorkerStatePending {
+		return fmt.Errorf("cannot start TWAPWorker: expected state Pending, got %s", w.syncState.State)
 	}
 
 	if w.logger == nil {
 		w.logger = logrus.WithFields(logrus.Fields{
 			"component": "twap",
-			"symbol":    w.symbol,
+			"symbol":    w.syncState.Symbol,
 		})
 	}
 
 	// start the executor
-	w.twapExecutor.SetLogger(w.logger)
-	w.twapExecutor.Start()
+	w.syncState.TWAPExecutor.SetLogger(w.logger)
+	w.syncState.TWAPExecutor.Start()
 
-	w.resetTime(currentTime, w.config.Duration)
+	w.resetTime(currentTime, w.syncState.Config.Duration)
 
 	w.logger.Infof(
 		"[TWAP Start] started: targetPosition=%s, duration=%s, interval=%s",
-		w.targetPosition,
-		w.config.Duration,
-		w.placeOrderInterval,
+		w.syncState.TargetPosition,
+		w.syncState.Config.Duration,
+		w.syncState.PlaceOrderInterval,
 	)
 	return nil
 }
@@ -263,10 +248,10 @@ func (w *TWAPWorker) RemainingDuration(currentTime time.Time) time.Duration {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if currentTime.After(w.endTime) {
+	if currentTime.After(w.syncState.EndTime) {
 		return 0
 	}
-	return w.endTime.Sub(currentTime)
+	return w.syncState.EndTime.Sub(currentTime)
 }
 
 // ResetTime resets the start and end time of the TWAP execution.
@@ -280,21 +265,21 @@ func (w *TWAPWorker) ResetTime(currentTime time.Time, duration time.Duration) {
 }
 
 func (w *TWAPWorker) resetTime(currentTime time.Time, duration time.Duration) {
-	w.state = TWAPWorkerStateRunning
-	w.startTime = currentTime
-	w.config.Duration = duration
-	w.endTime = currentTime.Add(w.config.Duration)
+	w.syncState.State = TWAPWorkerStateRunning
+	w.syncState.StartTime = currentTime
+	w.syncState.Config.Duration = duration
+	w.syncState.EndTime = currentTime.Add(w.syncState.Config.Duration)
 
-	numSlices := w.config.NumSlices
+	numSlices := w.syncState.Config.NumSlices
 	if numSlices <= 0 {
 		numSlices = 1
 	}
 
-	w.placeOrderInterval = w.config.Duration / time.Duration(numSlices)
-	w.currentIntervalStart = currentTime
-	w.currentIntervalEnd = w.currentIntervalStart.Add(w.placeOrderInterval)
-	if w.currentIntervalEnd.After(w.endTime) {
-		w.currentIntervalEnd = w.endTime
+	w.syncState.PlaceOrderInterval = w.syncState.Config.Duration / time.Duration(numSlices)
+	w.syncState.CurrentIntervalStart = currentTime
+	w.syncState.CurrentIntervalEnd = w.syncState.CurrentIntervalStart.Add(w.syncState.PlaceOrderInterval)
+	if w.syncState.CurrentIntervalEnd.After(w.syncState.EndTime) {
+		w.syncState.CurrentIntervalEnd = w.syncState.EndTime
 	}
 
 	w.syncAndResetActiveOrder()
@@ -305,24 +290,24 @@ func (w *TWAPWorker) Stop() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.state == TWAPWorkerStateRunning || w.state == TWAPWorkerStatePending {
-		if w.activeOrder != nil {
-			err := w.twapExecutor.CancelOrder(w.ctx, *w.activeOrder)
+	if w.syncState.State == TWAPWorkerStateRunning || w.syncState.State == TWAPWorkerStatePending {
+		if w.syncState.ActiveOrder != nil {
+			err := w.syncState.TWAPExecutor.CancelOrder(w.ctx, *w.syncState.ActiveOrder)
 			if err != nil {
-				w.logger.WithError(err).Warnf("[TWAP Stop] failed to cancel active order: %s", w.activeOrder)
+				w.logger.WithError(err).Warnf("[TWAP Stop] failed to cancel active order: %s", w.syncState.ActiveOrder)
 			}
 		}
 
 		// stop executor
-		if err := w.twapExecutor.Stop(); err != nil {
+		if err := w.syncState.TWAPExecutor.Stop(); err != nil {
 			w.logger.WithError(err).Warn("[TWAP Stop] failed to stop TWAP executor")
 		}
 
-		w.state = TWAPWorkerStateDone
-		w.activeOrder = nil
+		w.syncState.State = TWAPWorkerStateDone
+		w.syncState.ActiveOrder = nil
 		w.logger.Infof(
 			"[TWAP Stop] stopped: filled=%s / target=%s",
-			w.filledPosition(), w.targetPosition,
+			w.filledPosition(), w.syncState.TargetPosition,
 		)
 	}
 }
@@ -331,18 +316,18 @@ func (w *TWAPWorker) Stop() {
 // its trades via REST API, updates ordersMap and tradesMap accordingly, then
 // resets activeOrder to nil. Must be called under lock.
 func (w *TWAPWorker) syncAndResetActiveOrder() *types.Order {
-	if w.activeOrder == nil {
+	if w.syncState.ActiveOrder == nil {
 		return nil
 	}
 
-	if err := w.twapExecutor.SyncOrder(*w.activeOrder); err != nil {
-		w.logger.WithError(err).Warnf("[TWAP syncAndResetActiveOrder] fail to sync active order, resetting: %s", w.activeOrder.String())
-		w.activeOrder = nil
+	if err := w.syncState.TWAPExecutor.SyncOrder(*w.syncState.ActiveOrder); err != nil {
+		w.logger.WithError(err).Warnf("[TWAP syncAndResetActiveOrder] fail to sync active order, resetting: %s", w.syncState.ActiveOrder.String())
+		w.syncState.ActiveOrder = nil
 		return nil
 	}
 
-	oriActiveOrder, _ := w.twapExecutor.GetOrder(w.activeOrder.OrderID)
-	w.activeOrder = nil
+	oriActiveOrder, _ := w.syncState.TWAPExecutor.GetOrder(w.syncState.ActiveOrder.OrderID)
+	w.syncState.ActiveOrder = nil
 	return &oriActiveOrder
 }
 
@@ -358,27 +343,27 @@ func (w *TWAPWorker) Tick(currentTime time.Time, orderBook types.OrderBook) erro
 
 func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) error {
 	defer func() {
-		if currentTime.After(w.currentIntervalEnd) {
-			w.currentIntervalStart = w.currentIntervalEnd
-			w.currentIntervalEnd = w.currentIntervalStart.Add(w.placeOrderInterval)
-			if w.currentIntervalStart.After(w.endTime) {
-				w.currentIntervalStart = w.endTime
+		if currentTime.After(w.syncState.CurrentIntervalEnd) {
+			w.syncState.CurrentIntervalStart = w.syncState.CurrentIntervalEnd
+			w.syncState.CurrentIntervalEnd = w.syncState.CurrentIntervalStart.Add(w.syncState.PlaceOrderInterval)
+			if w.syncState.CurrentIntervalStart.After(w.syncState.EndTime) {
+				w.syncState.CurrentIntervalStart = w.syncState.EndTime
 			}
-			if w.currentIntervalEnd.After(w.endTime) {
-				w.currentIntervalEnd = w.endTime
+			if w.syncState.CurrentIntervalEnd.After(w.syncState.EndTime) {
+				w.syncState.CurrentIntervalEnd = w.syncState.EndTime
 			}
 		}
-		if currentTime.After(w.endTime) {
-			w.state = TWAPWorkerStateDone
+		if currentTime.After(w.syncState.EndTime) {
+			w.syncState.State = TWAPWorkerStateDone
 		}
 	}()
 
-	if w.state != TWAPWorkerStateRunning {
+	if w.syncState.State != TWAPWorkerStateRunning {
 		// the worker is not running
 		return nil
 	}
 
-	if currentTime.Before(w.currentIntervalStart) {
+	if currentTime.Before(w.syncState.CurrentIntervalStart) {
 		// not time for the next order yet
 		return nil
 	}
@@ -394,17 +379,17 @@ func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) erro
 	}
 
 	// check if deadline exceeded
-	deadlineExceeded := !currentTime.Before(w.endTime)
+	deadlineExceeded := !currentTime.Before(w.syncState.EndTime)
 	// if deadline exceeded, we want to place a final order for the remaining quantity
 	if deadlineExceeded {
-		if w.activeOrder != nil {
-			if err := w.twapExecutor.CancelOrder(w.ctx, *w.activeOrder); err != nil {
+		if w.syncState.ActiveOrder != nil {
+			if err := w.syncState.TWAPExecutor.CancelOrder(w.ctx, *w.syncState.ActiveOrder); err != nil {
 				w.logger.WithError(err).Warn("[TWAP tick] failed to cancel active order when deadline exceeded")
 				return nil
 			}
 			w.syncAndResetActiveOrder()
 		}
-		createdOrder, err := w.twapExecutor.PlaceOrder(
+		createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(
 			remaining.Abs(),
 			orderSide(remaining),
 			orderBook,
@@ -413,39 +398,39 @@ func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) erro
 		if err != nil || createdOrder == nil {
 			return fmt.Errorf("failed to place final order when deadline exceeded: %w", err)
 		}
-		w.activeOrder = createdOrder
+		w.syncState.ActiveOrder = createdOrder
 		return nil
 	}
 	// from here, deadline not exceeded
 
 	// we don't have an active order, place a new one
-	if w.activeOrder == nil {
+	if w.syncState.ActiveOrder == nil {
 		sliceQty := w.calculateSliceQuantity(currentTime, remaining, false)
-		createdOrder, err := w.twapExecutor.PlaceOrder(sliceQty, orderSide(remaining), orderBook, false)
+		createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(sliceQty, orderSide(remaining), orderBook, false)
 		if err != nil || createdOrder == nil {
 			return fmt.Errorf("failed to place order: %w", err)
 		}
-		w.activeOrder = createdOrder
+		w.syncState.ActiveOrder = createdOrder
 		return nil
 	}
 	// from here, active order is not nil
 
 	// we are within current interval and we have a better price
-	if w.shouldUpdateActiveOrder(orderBook) && currentTime.Before(w.currentIntervalEnd) {
+	if w.shouldUpdateActiveOrder(orderBook) && currentTime.Before(w.syncState.CurrentIntervalEnd) {
 		// throttle order updates to avoid excessive cancel-and-replace
-		if !w.lastCheckTime.IsZero() && currentTime.Sub(w.lastCheckTime) < w.config.CheckInterval {
+		if !w.syncState.LastCheckTime.IsZero() && currentTime.Sub(w.syncState.LastCheckTime) < w.syncState.Config.CheckInterval {
 			return nil
 		}
-		w.lastCheckTime = currentTime
+		w.syncState.LastCheckTime = currentTime
 
-		if err := w.twapExecutor.CancelOrder(w.ctx, *w.activeOrder); err != nil {
+		if err := w.syncState.TWAPExecutor.CancelOrder(w.ctx, *w.syncState.ActiveOrder); err != nil {
 			w.logger.WithError(err).Warn("[TWAP tick] failed to cancel active order")
 			return nil
 		}
 		// find the better price and submit new order
-		createdOrder, err := w.twapExecutor.PlaceOrder(
-			w.activeOrder.GetRemainingQuantity(),
-			w.activeOrder.Side,
+		createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(
+			w.syncState.ActiveOrder.GetRemainingQuantity(),
+			w.syncState.ActiveOrder.Side,
 			orderBook,
 			deadlineExceeded,
 		)
@@ -453,7 +438,7 @@ func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) erro
 			return fmt.Errorf("failed to place replacement order: %w", err)
 		}
 		oriActiveOrder := w.syncAndResetActiveOrder()
-		w.activeOrder = createdOrder
+		w.syncState.ActiveOrder = createdOrder
 		w.logger.Infof("[TWAP tick] active order updated: %s %s qty=%s(executed: %s)->%s price=%s->%s",
 			createdOrder.Side,
 			createdOrder.Type,
@@ -467,18 +452,18 @@ func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) erro
 	}
 
 	// we are within the current interval, just wait for the next tick
-	if currentTime.Before(w.currentIntervalEnd) {
+	if currentTime.Before(w.syncState.CurrentIntervalEnd) {
 		return nil
 	}
 
 	// currentTime is after current interval end, time to place the next slice order
 	// calculate slice quantity
 	sliceQty := w.calculateSliceQuantity(currentTime, remaining, deadlineExceeded)
-	createdOrder, err := w.twapExecutor.PlaceOrder(sliceQty, orderSide(remaining), orderBook, deadlineExceeded)
+	createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(sliceQty, orderSide(remaining), orderBook, deadlineExceeded)
 	if err != nil || createdOrder == nil {
 		return fmt.Errorf("failed to place order for next slice: %w", err)
 	}
-	w.activeOrder = createdOrder
+	w.syncState.ActiveOrder = createdOrder
 
 	return nil
 }
@@ -491,12 +476,12 @@ func (w *TWAPWorker) calculateSliceQuantity(currentTime time.Time, remaining fix
 	}
 
 	// dynamic slice: remaining / remaining_slices
-	timeLeft := w.endTime.Sub(currentTime)
+	timeLeft := w.syncState.EndTime.Sub(currentTime)
 	if timeLeft <= 0 {
 		return remaining
 	}
 
-	remainingSlices := int(timeLeft / w.placeOrderInterval)
+	remainingSlices := int(timeLeft / w.syncState.PlaceOrderInterval)
 	if remainingSlices <= 0 {
 		remainingSlices = 1
 	}
@@ -504,15 +489,15 @@ func (w *TWAPWorker) calculateSliceQuantity(currentTime time.Time, remaining fix
 	sliceQty := remaining.Div(fixedpoint.NewFromInt(int64(remainingSlices)))
 
 	// apply min/max slice size constraints
-	if w.config.MaxSliceSize.Sign() > 0 && sliceQty.Compare(w.config.MaxSliceSize) > 0 {
-		sliceQty = w.config.MaxSliceSize
+	if w.syncState.Config.MaxSliceSize.Sign() > 0 && sliceQty.Compare(w.syncState.Config.MaxSliceSize) > 0 {
+		sliceQty = w.syncState.Config.MaxSliceSize
 	}
-	if w.config.MinSliceSize.Sign() > 0 && sliceQty.Compare(w.config.MinSliceSize) < 0 {
+	if w.syncState.Config.MinSliceSize.Sign() > 0 && sliceQty.Compare(w.syncState.Config.MinSliceSize) < 0 {
 		// if remaining is less than min, just use remaining
-		if remaining.Compare(w.config.MinSliceSize) <= 0 {
+		if remaining.Compare(w.syncState.Config.MinSliceSize) <= 0 {
 			sliceQty = remaining
 		} else {
-			sliceQty = w.config.MinSliceSize
+			sliceQty = w.syncState.Config.MinSliceSize
 		}
 	}
 
@@ -528,30 +513,30 @@ func (w *TWAPWorker) calculateSliceQuantity(currentTime time.Time, remaining fix
 // with a better price. For taker orders (IOC), always update. For maker orders,
 // compare the current order price against the best computed maker price.
 func (w *TWAPWorker) shouldUpdateActiveOrder(orderBook types.OrderBook) bool {
-	if w.activeOrder == nil {
+	if w.syncState.ActiveOrder == nil {
 		return false
 	}
 
 	// taker orders are IOC — always refresh
-	if w.config.OrderType == TWAPOrderTypeTaker {
+	if w.syncState.Config.OrderType == TWAPOrderTypeTaker {
 		return true
 	}
 
-	newPrice, err := w.twapExecutor.GetPrice(w.activeOrder.Side, orderBook)
+	newPrice, err := w.syncState.TWAPExecutor.GetPrice(w.syncState.ActiveOrder.Side, orderBook)
 	if err != nil {
 		w.logger.WithError(err).Warn("[TWAP shouldUpdateOrder] failed to get price for order update check")
 		return false
 	}
 
 	newPriceBtter := false
-	switch w.activeOrder.Side {
+	switch w.syncState.ActiveOrder.Side {
 	case types.SideTypeBuy:
-		newPriceBtter = newPrice.Compare(w.activeOrder.Price) > 0
+		newPriceBtter = newPrice.Compare(w.syncState.ActiveOrder.Price) > 0
 	case types.SideTypeSell:
-		newPriceBtter = newPrice.Compare(w.activeOrder.Price) < 0
+		newPriceBtter = newPrice.Compare(w.syncState.ActiveOrder.Price) < 0
 	}
 	w.logger.Infof("[TWAP shouldUpdateOrder] order update check: current price=%s, new price=%s, better=%t",
-		w.activeOrder.Price.String(), newPrice.String(), newPriceBtter)
+		w.syncState.ActiveOrder.Price.String(), newPrice.String(), newPriceBtter)
 	return newPriceBtter
 }
 
