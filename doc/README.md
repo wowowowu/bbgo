@@ -5,6 +5,7 @@
 * [Commands](commands/bbgo.md) - BBGO command line usage
 * [Build From Source](build-from-source.md) - How to build bbgo
 * [Back-testing](topics/back-testing.md) - How to back-test strategies
+* [Maintenance Mode](topics/maintenance.md) - Define maintenance window for exchange sessions
 * [TWAP](topics/twap.md) - TWAP order execution to buy/sell large quantity of order
 * [Dnum Installation](topics/dnum-binary.md) - installation of high-precision version of bbgo
 * [bbgo completion](topics/bbgo-completion.md) - Convenient use of the command line
