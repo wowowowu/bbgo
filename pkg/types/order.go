@@ -315,10 +315,10 @@ func (o *SubmitOrder) amountField() *slack.AttachmentField {
 }
 
 type OrderQuery struct {
-	Symbol        string
-	OrderID       string
-	ClientOrderID string
-	OrderUUID     string
+	Symbol        string `json:"symbol"`
+	OrderID       string `json:"orderID"`
+	ClientOrderID string `json:"clientOrderID,omitempty"`
+	OrderUUID     string `json:"orderUUID,omitempty"`
 }
 
 type Order struct {
