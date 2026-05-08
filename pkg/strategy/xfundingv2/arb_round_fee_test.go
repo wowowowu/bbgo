@@ -80,11 +80,24 @@ func TestStrategy_AquireFeeAssetAndTransfer(t *testing.T) {
 
 		mockService := &mockFuturesServiceForFee{}
 
+		// Create a GeneralOrderExecutor for the fee symbol so acquireFeeAssetAndTransfer can buy fee assets
+		position := types.NewPositionFromMarket(types.Market{
+			Symbol:          "BNBUSDT",
+			BaseCurrency:    "BNB",
+			QuoteCurrency:   "USDT",
+			TickSize:        Number(0.01),
+			StepSize:        Number(0.001),
+			PricePrecision:  2,
+			VolumePrecision: 3,
+		})
+		feeExecutor := bbgo.NewGeneralOrderExecutor(spotSession, "BNBUSDT", "xfundingv2", "test", position)
+
 		s := &Strategy{
-			FeeSymbol:      "BNBUSDT",
-			spotSession:    spotSession,
-			futuresSession: futuresSession,
-			futuresService: mockService,
+			FeeSymbol:                 "BNBUSDT",
+			spotSession:               spotSession,
+			futuresSession:            futuresSession,
+			futuresService:            mockService,
+			spotGeneralOrderExecutors: map[string]*bbgo.GeneralOrderExecutor{"BNBUSDT": feeExecutor},
 		}
 
 		return s, mockExchange, mockService
