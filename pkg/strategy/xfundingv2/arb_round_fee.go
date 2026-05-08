@@ -80,7 +80,11 @@ func (s *Strategy) acquireFeeAssetAndTransfer(ctx context.Context, rounds []*Arb
 		}
 	}
 	if !buyQuantity.IsZero() {
-		if _, err := s.spotSession.Exchange.SubmitOrder(ctx, types.SubmitOrder{
+		orderExecutor, found := s.spotGeneralOrderExecutors[s.FeeSymbol]
+		if !found {
+			return fmt.Errorf("no order executor found for fee symbol %s", s.FeeSymbol)
+		}
+		if _, err := orderExecutor.SubmitOrders(ctx, types.SubmitOrder{
 			Symbol:   s.FeeSymbol,
 			Side:     types.SideTypeBuy,
 			Type:     types.OrderTypeMarket,

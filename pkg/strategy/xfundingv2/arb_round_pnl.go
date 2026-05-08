@@ -48,6 +48,20 @@ func (r *ArbitrageRound) PnL(ctx context.Context, currentTime time.Time) RoundPn
 
 	spotPosition := types.NewPositionFromMarket(spotMarket)
 	futuresPosition := types.NewPositionFromMarket(futuresMarket)
+	if r.spotExchangeFeeRates != nil {
+		spotPosition.ExchangeFeeRates = r.spotExchangeFeeRates
+	}
+	if r.futuresExchangeFeeRates != nil {
+		futuresPosition.ExchangeFeeRates = r.futuresExchangeFeeRates
+	}
+	if !r.avgFeeCost.IsZero() {
+		spotPosition.FeeAverageCosts = map[string]fixedpoint.Value{
+			r.feeSymbol: r.avgFeeCost,
+		}
+		futuresPosition.FeeAverageCosts = map[string]fixedpoint.Value{
+			r.feeSymbol: r.avgFeeCost,
+		}
+	}
 
 	spotProfitStats := types.NewProfitStats(spotMarket)
 	futuresProfitStats := types.NewProfitStats(futuresMarket)
