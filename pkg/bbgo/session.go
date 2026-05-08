@@ -114,6 +114,23 @@ func (sessions ExchangeSessionMap) AggregateBalances(
 	return totalBalances, sessionBalances, nil
 }
 
+type MaintenanceConfig struct {
+	StartTime *types.LooseFormatTime `json:"startTime" yaml:"startTime"`
+	EndTime   *types.LooseFormatTime `json:"endTime" yaml:"endTime"`
+
+	// BalanceQueryAvailable if true, then balance query is available (read only operations)
+	BalanceQueryAvailable bool `json:"balanceQueryAvailable" yaml:"balanceQueryAvailable"`
+}
+
+func (c *MaintenanceConfig) IsInMaintenance() bool {
+	if c == nil || c.StartTime == nil || c.EndTime == nil {
+		return false
+	}
+
+	now := time.Now()
+	return now.After(c.StartTime.Time()) && now.Before(c.EndTime.Time())
+}
+
 type ExchangeSessionConfig struct {
 	Name         string             `json:"name,omitempty" yaml:"name,omitempty"`
 	ExchangeName types.ExchangeName `json:"exchange" yaml:"exchange"`
@@ -166,6 +183,8 @@ type ExchangeSessionConfig struct {
 	Withdrawal bool `json:"withdrawal,omitempty" yaml:"withdrawal,omitempty"`
 
 	UseHeikinAshi bool `json:"heikinAshi,omitempty" yaml:"heikinAshi,omitempty"`
+
+	Maintenance *MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty"`
 }
 
 // ExchangeSession presents the exchange connection Session
@@ -1392,6 +1411,14 @@ func (session *ExchangeSession) FormatOrders(orders []types.SubmitOrder) (format
 // be sure to check nil before using it:
 //
 //	if session.Margin { ... := session.GetMarginInfoUpdater() }
+func (session *ExchangeSession) IsInMaintenance() bool {
+	if session.Maintenance != nil {
+		return session.Maintenance.IsInMaintenance()
+	}
+
+	return false
+}
+
 func (session *ExchangeSession) GetMarginInfoUpdater() *MarginInfoUpdater {
 	return session.marginInfoUpdater
 }

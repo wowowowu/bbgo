@@ -154,7 +154,23 @@ var layout = "2006-01-02 15:04:05.999Z07:00"
 
 func (t *Time) UnmarshalJSON(data []byte) error {
 	// fallback to RFC3339
-	return (*time.Time)(t).UnmarshalJSON(data)
+	err := (*time.Time)(t).UnmarshalJSON(data)
+	if err == nil {
+		return nil
+	}
+
+	var v string
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+
+	tv, err := ParseTimeWithFormats(v, looseTimeFormats)
+	if err != nil {
+		return err
+	}
+
+	*t = Time(tv)
+	return nil
 }
 
 func (t Time) MarshalJSON() ([]byte, error) {
@@ -310,12 +326,12 @@ func (t *LooseFormatTime) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	tv, err := ParseTimeWithFormats(v, looseTimeFormats)
+	lt, err := ParseLooseFormatTime(v)
 	if err != nil {
 		return err
 	}
 
-	*t = LooseFormatTime(tv)
+	*t = lt
 	return nil
 }
 
