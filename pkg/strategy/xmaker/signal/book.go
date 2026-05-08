@@ -37,6 +37,7 @@ type OrderBookBestPriceVolumeSignal struct {
 	RatioThreshold fixedpoint.Value `json:"ratioThreshold"`
 	MinVolume      fixedpoint.Value `json:"minVolume"`
 	MinQuoteVolume fixedpoint.Value `json:"minQuoteVolume"`
+	MinDelta       fixedpoint.Value `json:"minDelta"`
 
 	Window          int    `json:"window"`
 	SmoothingWindow int    `json:"smoothingWindow"`
@@ -100,12 +101,12 @@ func (s *OrderBookBestPriceVolumeSignal) CalculateSignal(ctx context.Context) (f
 		return 0.0, nil
 	}
 
-	bidVolume := bid.Volume
-	askVolume := ask.Volume
+	bidVolume := bid.Price.Mul(bid.Volume)
+	askVolume := ask.Price.Mul(ask.Volume)
 
 	if s.bidVolumeSeries != nil {
-		s.bidVolumeSeries.PushAndEmit(bid.Volume.Float64())
-		s.askVolumeSeries.PushAndEmit(ask.Volume.Float64())
+		s.bidVolumeSeries.PushAndEmit(bid.Price.Mul(bid.Volume).Float64())
+		s.askVolumeSeries.PushAndEmit(ask.Price.Mul(ask.Volume).Float64())
 
 		bidVolume = fixedpoint.NewFromFloat(s.bidVolumeIndicator.(types.Series).Index(0))
 		askVolume = fixedpoint.NewFromFloat(s.askVolumeIndicator.(types.Series).Index(0))
@@ -118,6 +119,8 @@ func (s *OrderBookBestPriceVolumeSignal) CalculateSignal(ctx context.Context) (f
 	denominator := fixedpoint.One.Sub(s.RatioThreshold)
 	signal := 0.0
 	if bidVolume.Compare(s.MinVolume) < 0 && askVolume.Compare(s.MinVolume) < 0 {
+		signal = 0.0
+	} else if bidVolume.Sub(askVolume).Abs().Compare(s.MinDelta) < 0 {
 		signal = 0.0
 	} else if bidRatio.Compare(s.RatioThreshold) >= 0 {
 		numerator := bidRatio.Sub(s.RatioThreshold)
