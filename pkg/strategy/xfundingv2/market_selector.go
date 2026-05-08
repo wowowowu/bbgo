@@ -56,7 +56,7 @@ func (c *MarketSelectionConfig) Defaults() {
 		c.MaxHoldingHours = types.Duration(time.Hour * 48)
 	}
 	if c.TradeBalanceRatio.IsZero() {
-		c.TradeBalanceRatio = fixedpoint.One
+		c.TradeBalanceRatio = fixedpoint.NewFromFloat(0.999)
 	}
 	if c.MinAnnualizedRate.IsZero() {
 		c.MinAnnualizedRate = fixedpoint.NewFromFloat(0.05) // 5%
