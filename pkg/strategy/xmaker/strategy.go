@@ -955,6 +955,21 @@ func (s *Strategy) allowMarginHedge(
 }
 
 func (s *Strategy) updateQuote(ctx context.Context) error {
+	if !s.hedgeSession.Connectivity.IsConnected() {
+		s.logger.Warnf("source session is disconnected, skipping update quote")
+		return nil
+	}
+
+	if s.hedgeSession.IsInMaintenance() {
+		s.logger.Warnf("source session is in maintenance, skipping update quote")
+		return nil
+	}
+
+	if !s.makerSession.Connectivity.IsConnected() {
+		s.logger.Warnf("maker session is disconnected, skipping update quote")
+		return nil
+	}
+
 	cancelMakerOrdersProfile := timeprofile.Start("cancelMakerOrders")
 
 	if err := s.activeMakerOrders.GracefulCancel(ctx, s.makerSession.Exchange); err != nil {
@@ -967,16 +982,6 @@ func (s *Strategy) updateQuote(ctx context.Context) error {
 
 	if s.activeMakerOrders.NumOfOrders() > 0 {
 		s.logger.Warnf("unable to cancel all %s orders, skipping placing maker orders", s.Symbol)
-		return nil
-	}
-
-	if !s.hedgeSession.Connectivity.IsConnected() {
-		s.logger.Warnf("source session is disconnected, skipping update quote")
-		return nil
-	}
-
-	if !s.makerSession.Connectivity.IsConnected() {
-		s.logger.Warnf("maker session is disconnected, skipping update quote")
 		return nil
 	}
 
