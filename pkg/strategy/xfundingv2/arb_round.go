@@ -42,6 +42,7 @@ type ArbitrageRound struct {
 	mu sync.Mutex
 
 	triggeredFundingRate                     fixedpoint.Value
+	triggeredSpotTargetPosition              fixedpoint.Value
 	minHoldingIntervals                      int
 	fundingIntervalHours                     int
 	fundingIntervalStart, fundingIntervalEnd time.Time
@@ -89,12 +90,13 @@ func NewArbitrageRound(
 	fundingIntervalStart := fundingRate.NextFundingTime.Add(-time.Duration(fundingIntervalHours) * time.Hour)
 	fundingIntervalEnd := fundingRate.NextFundingTime.Add(-time.Second)
 	return &ArbitrageRound{
-		triggeredFundingRate: fundingRate.LastFundingRate,
-		minHoldingIntervals:  minHoldingIntervals,
-		fundingIntervalHours: fundingIntervalHours,
-		fundingIntervalStart: fundingIntervalStart,
-		fundingIntervalEnd:   fundingIntervalEnd,
-		fundingFeeRecords:    make(map[int64]FundingFee),
+		triggeredFundingRate:        fundingRate.LastFundingRate,
+		triggeredSpotTargetPosition: spotTwap.TargetPosition(),
+		minHoldingIntervals:         minHoldingIntervals,
+		fundingIntervalHours:        fundingIntervalHours,
+		fundingIntervalStart:        fundingIntervalStart,
+		fundingIntervalEnd:          fundingIntervalEnd,
+		fundingFeeRecords:           make(map[int64]FundingFee),
 
 		spotWorker:    spotTwap,
 		futuresWorker: futuresTwap,
@@ -147,6 +149,45 @@ func (r *ArbitrageRound) FuturesFeeAssetAmount() fixedpoint.Value {
 	defer r.mu.Unlock()
 
 	return r.futuresFeeAssetAmount
+}
+
+// RequiredFeeAssetAmount returns the required fee asset amount for the round based on its current state and position.
+// The first return value is for the spot leg and the second return value is for the futures leg.
+func (r *ArbitrageRound) RequiredFeeAssetAmounts() (fixedpoint.Value, fixedpoint.Value) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	halfSpotFee := r.spotFeeAssetAmount.Div(fixedpoint.Two)
+	halfFuturesFee := r.futuresFeeAssetAmount.Div(fixedpoint.Two)
+	switch r.state {
+	case RoundPending:
+		return r.spotFeeAssetAmount, r.futuresFeeAssetAmount
+	case RoundOpening:
+		// calculate the executed ratio
+		executedRatio := fixedpoint.Zero
+		if !r.spotWorker.TargetPosition().IsZero() {
+			executedRatio = r.spotWorker.FilledPosition().Abs().Div(r.spotWorker.TargetPosition().Abs())
+		}
+		remainRatio := fixedpoint.Max(
+			fixedpoint.One.Sub(executedRatio),
+			fixedpoint.Zero,
+		)
+		// add 1x for the closing leg fee
+		remainRatio = remainRatio.Add(fixedpoint.One)
+		return halfSpotFee.Mul(remainRatio), halfFuturesFee.Mul(remainRatio)
+	case RoundReady, RoundClosing:
+		executedRatio := fixedpoint.Zero
+		if !r.triggeredSpotTargetPosition.IsZero() {
+			executedRatio = r.spotWorker.FilledPosition().Abs().Div(r.triggeredSpotTargetPosition.Abs())
+		}
+		remainRatio := fixedpoint.Max(
+			fixedpoint.One.Sub(executedRatio),
+			fixedpoint.Zero,
+		)
+		return halfSpotFee.Mul(remainRatio), halfFuturesFee.Mul(remainRatio)
+	}
+	// the round is closed, no fee asset is required
+	return fixedpoint.Zero, fixedpoint.Zero
 }
 
 func (r *ArbitrageRound) StartTime() time.Time {

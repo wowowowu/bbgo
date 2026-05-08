@@ -389,8 +389,8 @@ func TestStrategy_CalculateRoundFeeAsset(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Both legs have the same price and fee rate, so fee amounts are equal
-		assert.Equal(t, Number(0.1), round.SpotFeeAssetAmount())
-		assert.Equal(t, Number(0.1), round.FuturesFeeAssetAmount())
+		assert.Equal(t, Number(0.2), round.SpotFeeAssetAmount())
+		assert.Equal(t, Number(0.2), round.FuturesFeeAssetAmount())
 	})
 
 	t.Run("calculates fee amounts correctly (negative target position)", func(t *testing.T) {
@@ -454,7 +454,7 @@ func TestStrategy_CalculateRoundFeeAsset(t *testing.T) {
 		err := s.calculateRoundFeeAsset(round)
 		assert.NoError(t, err)
 
-		assert.Equal(t, Number(0.1), round.SpotFeeAssetAmount())
-		assert.Equal(t, Number(0.1), round.FuturesFeeAssetAmount())
+		assert.Equal(t, Number(0.2), round.SpotFeeAssetAmount())
+		assert.Equal(t, Number(0.2), round.FuturesFeeAssetAmount())
 	})
 }

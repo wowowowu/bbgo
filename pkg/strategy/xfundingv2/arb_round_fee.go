@@ -10,30 +10,63 @@ import (
 	"github.com/c9s/bbgo/pkg/types"
 )
 
+type PendingRound struct {
+	Round         *ArbitrageRound
+	RetryCount    int
+	LastRetryTime time.Time
+}
+
 func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Time) {
-	var pendingRounds []*ArbitrageRound
-	for _, round := range s.pendingRounds {
+	var pendingRounds []*PendingRound
+	for _, pendingRound := range s.pendingRounds {
 		// moving round out from the pending list
-		delete(s.pendingRounds, round.SpotSymbol())
-		pendingRounds = append(pendingRounds, round)
-	}
-	var processedRounds []*ArbitrageRound
-	for _, round := range pendingRounds {
-		// calculate the fee asset required for the round
-		if err := s.calculateRoundFeeAsset(round); err != nil {
-			s.logger.WithError(err).Errorf(
-				"failed to prepare fee asset for round: %s",
-				round,
-			)
+		if pendingRound.RetryCount >= s.MaxPendingRoundRetry {
+			delete(s.pendingRounds, pendingRound.Round.SpotSymbol())
 			continue
 		}
-		processedRounds = append(processedRounds, round)
+		// the pending round is over the grace period, it is ready for another retry
+		if pendingRound.LastRetryTime.IsZero() || currentTime.Sub(pendingRound.LastRetryTime) >= s.PendingRoundGracePeriod.Duration() {
+			pendingRounds = append(pendingRounds, pendingRound)
+		}
 	}
-	if err := s.acquireFeeAssetAndTransfer(ctx, processedRounds); err != nil {
-		s.logger.WithError(err).Error("failed to acquire fee asset and transfer for pending rounds")
-		return
+	var processedRounds []*ArbitrageRound
+	if s.FeeSymbol != "" {
+		// prepare fee asset for the pending rounds
+		for _, pendingRound := range pendingRounds {
+			// calculate the fee asset required for the round
+			if err := s.calculateRoundFeeAsset(pendingRound.Round); err != nil {
+				s.logger.WithError(err).Errorf(
+					"failed to prepare fee asset for round: %s",
+					pendingRound.Round,
+				)
+				pendingRound.RetryCount++
+				pendingRound.LastRetryTime = currentTime
+				continue
+			}
+			processedRounds = append(processedRounds, pendingRound.Round)
+		}
+		// include the active rounds into fee asset preparation
+		var activeRounds []*ArbitrageRound
+		for _, activeRound := range s.activeRounds {
+			activeRounds = append(activeRounds, activeRound)
+		}
+		allRounds := append(processedRounds, activeRounds...)
+		if err := s.acquireFeeAssetAndTransfer(ctx, allRounds); err != nil {
+			s.logger.WithError(err).Error("failed to acquire fee asset and transfer for pending rounds")
+			for _, pendingRound := range pendingRounds {
+				pendingRound.RetryCount++
+				pendingRound.LastRetryTime = currentTime
+			}
+			return
+		}
+	} else {
+		// fee asset is not required, adding all pending rounds to the next step
+		for _, pendingRound := range pendingRounds {
+			processedRounds = append(processedRounds, pendingRound.Round)
+		}
 	}
 
+	// start the processed rounds and move them to active round list
 	for _, round := range processedRounds {
 		if err := round.Start(ctx, currentTime); err != nil {
 			s.logger.WithError(err).Errorf(
@@ -42,7 +75,9 @@ func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Ti
 			)
 			continue
 		}
+		// move to active round list
 		s.activeRounds[round.SpotSymbol()] = round
+		delete(s.pendingRounds, round.SpotSymbol())
 		s.logger.Infof("round started: %s", round)
 	}
 }
@@ -50,8 +85,9 @@ func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Ti
 func (s *Strategy) acquireFeeAssetAndTransfer(ctx context.Context, rounds []*ArbitrageRound) error {
 	var requiredSpotFeeAmount, requiredFuturesFeeAmount fixedpoint.Value
 	for _, round := range rounds {
-		requiredSpotFeeAmount = requiredSpotFeeAmount.Add(round.SpotFeeAssetAmount())
-		requiredFuturesFeeAmount = requiredFuturesFeeAmount.Add(round.FuturesFeeAssetAmount())
+		roundSpotFee, roundFuturesFee := round.RequiredFeeAssetAmounts()
+		requiredSpotFeeAmount = requiredSpotFeeAmount.Add(roundSpotFee)
+		requiredFuturesFeeAmount = requiredFuturesFeeAmount.Add(roundFuturesFee)
 	}
 	spotAccount := s.spotSession.GetAccount()
 	futuresAccount := s.futuresSession.GetAccount()
@@ -102,6 +138,10 @@ func (s *Strategy) acquireFeeAssetAndTransfer(ctx context.Context, rounds []*Arb
 }
 
 func (s *Strategy) calculateRoundFeeAsset(round *ArbitrageRound) error {
+	if !round.SpotFeeAssetAmount().IsZero() || !round.FuturesFeeAssetAmount().IsZero() {
+		// already calculated, no need to calculate again
+		return nil
+	}
 	feeOrderBook, ok := s.spotOrderBooks[s.FeeSymbol]
 	if !ok {
 		return nil
@@ -145,6 +185,10 @@ func (s *Strategy) calculateRoundFeeAsset(round *ArbitrageRound) error {
 	feeAssetPrice := feeSellBook.AverageDepthPriceByQuote(totalFeeInQuote, 0)
 	spotFeeAmount = spotFeeInQuote.Div(feeAssetPrice)
 	futuresFeeAmount = futuresFeeInQuote.Div(feeAssetPrice)
+
+	// multiply by 2 -> for entry and exit
+	spotFeeAmount = spotFeeAmount.Mul(fixedpoint.Two)
+	futuresFeeAmount = futuresFeeAmount.Mul(fixedpoint.Two)
 
 	round.SetSpotFeeAssetAmount(spotFeeAmount)
 	round.SetFuturesFeeAssetAmount(futuresFeeAmount)

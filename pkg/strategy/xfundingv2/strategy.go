@@ -47,7 +47,9 @@ type Strategy struct {
 	FeeSymbol     string `json:"feeSymbol"`
 	QuoteCurrency string `json:"quoteCurrency"`
 
-	TWAPWorkerConfig TWAPWorkerConfig `json:"twap"`
+	PendingRoundGracePeriod types.Duration   `json:"pendingRoundGracePeriod"`
+	MaxPendingRoundRetry    int              `json:"maxPendingRoundRetry"`
+	TWAPWorkerConfig        TWAPWorkerConfig `json:"twap"`
 
 	// Market selection criteria
 	MarketSelectionConfig *MarketSelectionConfig      `json:"marketSelection,omitempty"`
@@ -66,7 +68,7 @@ type Strategy struct {
 	costEstimator             *CostEstimator
 	preliminaryMarketSelector *MarketSelector
 
-	pendingRounds map[string]*ArbitrageRound
+	pendingRounds map[string]*PendingRound
 	activeRounds  map[string]*ArbitrageRound
 
 	coinmarketcapClient *coinmarketcap.DataSource
@@ -120,6 +122,13 @@ func (s *Strategy) Defaults() error {
 		s.QuoteCurrency = "USDT"
 	}
 
+	if s.PendingRoundGracePeriod.Duration() == 0 {
+		s.PendingRoundGracePeriod = types.Duration(time.Minute * 10)
+	}
+	if s.MaxPendingRoundRetry == 0 {
+		s.MaxPendingRoundRetry = 3
+	}
+
 	return nil
 }
 
@@ -159,7 +168,7 @@ func (s *Strategy) Initialize() error {
 		s.MaxPositionExposure = make(map[string]fixedpoint.Value)
 	}
 	s.activeRounds = make(map[string]*ArbitrageRound)
-	s.pendingRounds = make(map[string]*ArbitrageRound)
+	s.pendingRounds = make(map[string]*PendingRound)
 	return nil
 }
 
@@ -608,12 +617,10 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 					},
 				},
 			)
-			if err := round.Start(ctx, currentTime); err != nil {
-				s.logger.WithError(err).Errorf("failed to start arbitrage round: %s", selectedCandidate.Symbol)
-				return
-			}
 			// save as pending round for the fee asset preparation
-			s.pendingRounds[selectedCandidate.Symbol] = round
+			s.pendingRounds[selectedCandidate.Symbol] = &PendingRound{
+				Round: round,
+			}
 		}
 	}
 }
