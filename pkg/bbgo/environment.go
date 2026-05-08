@@ -296,7 +296,7 @@ func (environ *Environment) ConfigureExchangeSessions(userConfig *Config) error 
 }
 
 func (environ *Environment) AddExchangesByViperKeys() error {
-	for n, _ := range types.SupportedExchanges {
+	for n := range types.SupportedExchanges {
 		if viper.IsSet(string(n) + "-api-key") {
 			exMinimal, err := exchange.NewWithEnvVarPrefix(n, "")
 			if err != nil {
@@ -520,6 +520,11 @@ func (environ *Environment) syncWithUserConfig(ctx context.Context, userConfig *
 		}
 	}
 	for _, session := range sessions {
+		if session.IsInMaintenance() {
+			log.Infof("session %s is in maintenance mode, skipping sync", session.Name)
+			continue
+		}
+
 		var syncSymbols []string
 		// if there are session specific symbols defined, we use those.
 		// Otherwise we use the rest symbols that are not categorized into any session.
@@ -583,6 +588,11 @@ func (environ *Environment) Sync(ctx context.Context, userConfig ...*Config) err
 	// the default sync logics
 	since := defaultSyncSinceTime()
 	for _, session := range environ.sessions {
+		if session.IsInMaintenance() {
+			log.Infof("session %s is in maintenance mode, skipping sync", session.Name)
+			continue
+		}
+
 		if err := environ.syncSession(ctx, session, since); err != nil {
 			return err
 		}
@@ -652,6 +662,11 @@ func (environ *Environment) RecordPosition(position *types.Position, trade types
 }
 
 func (environ *Environment) SyncSession(ctx context.Context, session *ExchangeSession, defaultSymbols ...string) error {
+	if session.IsInMaintenance() {
+		log.Infof("session %s is in maintenance mode, skipping SyncSession", session.Name)
+		return nil
+	}
+
 	if environ.SyncService == nil {
 		return nil
 	}

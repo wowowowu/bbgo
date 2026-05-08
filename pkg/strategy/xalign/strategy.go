@@ -243,6 +243,11 @@ func (s *Strategy) selectSessionForCurrency(
 			continue
 		}
 
+		if session.IsInMaintenance() {
+			log.Infof("session %s is in maintenance, skipping", sessionName)
+			continue
+		}
+
 		account, err := session.UpdateAccount(ctx)
 		if err != nil {
 			log.WithError(err).Errorf("unable to update account for session %s", sessionName)
@@ -628,9 +633,30 @@ func (s *Strategy) align(ctx context.Context, sessions bbgo.ExchangeSessionMap) 
 		}
 	}
 
+	anyMaintenance := false
+	for _, session := range sessions {
+		if session.IsInMaintenance() {
+			anyMaintenance = true
+			break
+		}
+	}
+
 	totalBalances, _, err := sessions.AggregateBalances(ctx, false)
 	if err != nil {
 		log.WithError(err).Errorf("unable to aggregate balances")
+		return activeTransferExists
+	}
+
+	balanceQueryAvailable := true
+	for _, session := range sessions {
+		if session.IsInMaintenance() && session.Maintenance != nil && !session.Maintenance.BalanceQueryAvailable {
+			balanceQueryAvailable = false
+			break
+		}
+	}
+
+	if anyMaintenance && !balanceQueryAvailable {
+		log.Warn("one of the sessions is in maintenance and balance query is not available, skipping align")
 		return activeTransferExists
 	}
 
