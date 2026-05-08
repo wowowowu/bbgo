@@ -306,6 +306,34 @@ func (s *Strategy) CrossRun(
 		s.futuresGeneralOrderExecutors[symbol] = futuresExecutor
 	}
 
+	if s.FeeSymbol != "" {
+		feeMarket, found := s.spotSession.Market(s.FeeSymbol)
+		if !found {
+			return fmt.Errorf("fee market %s not found in spot session", s.FeeSymbol)
+		}
+		if feeMarket.QuoteCurrency != s.QuoteCurrency {
+			return fmt.Errorf("fee market %s quote currency %s does not match strategy quote currency %s",
+				s.FeeSymbol, feeMarket.QuoteCurrency, s.QuoteCurrency)
+		}
+		var spotPosition *types.Position
+		if p, found := s.spotPositions[s.FeeSymbol]; found {
+			spotPosition = p
+		} else {
+			spotPosition = types.NewPositionFromMarket(feeMarket)
+			s.spotPositions[s.FeeSymbol] = spotPosition
+		}
+		spotExecutor := bbgo.NewGeneralOrderExecutor(
+			s.spotSession,
+			s.FeeSymbol,
+			s.ID(),
+			s.InstanceID(),
+			spotPosition,
+		)
+		spotExecutor.DisableNotify()
+		spotExecutor.Bind()
+		s.spotGeneralOrderExecutors[s.FeeSymbol] = spotExecutor
+	}
+
 	// initialize depth books for model selection
 	// we create new stream here to save the bandwidth of the market data stream of the sessions
 	futureStream := s.futuresSession.Exchange.NewStream()
@@ -564,6 +592,22 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 				s.futuresService,
 			)
 			round.SetLogger(s.logger)
+			round.SetSpotExchangeFeeRates(
+				map[types.ExchangeName]types.ExchangeFee{
+					s.spotSession.ExchangeName: {
+						MakerFeeRate: s.spotSession.MakerFeeRate,
+						TakerFeeRate: s.spotSession.TakerFeeRate,
+					},
+				},
+			)
+			round.SetFuturesExchangeFeeRates(
+				map[types.ExchangeName]types.ExchangeFee{
+					s.futuresSession.ExchangeName: {
+						MakerFeeRate: s.futuresSession.MakerFeeRate,
+						TakerFeeRate: s.futuresSession.TakerFeeRate,
+					},
+				},
+			)
 			if err := round.Start(ctx, currentTime); err != nil {
 				s.logger.WithError(err).Errorf("failed to start arbitrage round: %s", selectedCandidate.Symbol)
 				return
@@ -796,5 +840,9 @@ func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound, t
 
 	s.logger.Infof("removing closed round: %s", round)
 	delete(s.activeRounds, round.SpotSymbol())
+	if executor, ok := s.spotGeneralOrderExecutors[s.FeeSymbol]; ok {
+		feeAvgCost := executor.Position().AverageCost
+		round.SetAvgFeeCost(s.FeeSymbol, feeAvgCost)
+	}
 	bbgo.Notify(round.PnL(ctx, tickTime))
 }

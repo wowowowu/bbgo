@@ -53,7 +53,10 @@ type ArbitrageRound struct {
 	futuresService FuturesService
 	asset          string // base asset, e.g. "BTC"
 
-	spotFeeAssetAmount, futuresFeeAssetAmount fixedpoint.Value
+	spotFeeAssetAmount, futuresFeeAssetAmount     fixedpoint.Value
+	spotExchangeFeeRates, futuresExchangeFeeRates map[types.ExchangeName]types.ExchangeFee
+	feeSymbol                                     string
+	avgFeeCost                                    fixedpoint.Value
 
 	retryDuration      time.Duration
 	retryTransferTickC chan time.Time
@@ -103,6 +106,19 @@ func NewArbitrageRound(
 		retryTransfers:     make(map[uint64]transferRetry),
 		retryTransferTickC: make(chan time.Time, 1),
 	}
+}
+
+func (r *ArbitrageRound) SetSpotExchangeFeeRates(rates map[types.ExchangeName]types.ExchangeFee) {
+	r.spotExchangeFeeRates = rates
+}
+
+func (r *ArbitrageRound) SetFuturesExchangeFeeRates(rates map[types.ExchangeName]types.ExchangeFee) {
+	r.futuresExchangeFeeRates = rates
+}
+
+func (r *ArbitrageRound) SetAvgFeeCost(feeSymbol string, cost fixedpoint.Value) {
+	r.feeSymbol = feeSymbol
+	r.avgFeeCost = cost
 }
 
 func (r *ArbitrageRound) SetSpotFeeAssetAmount(amount fixedpoint.Value) {
