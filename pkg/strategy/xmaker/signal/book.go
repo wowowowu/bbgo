@@ -8,6 +8,7 @@ import (
 
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/indicator/v2"
 	"github.com/c9s/bbgo/pkg/types"
 )
 
@@ -37,8 +38,18 @@ type OrderBookBestPriceVolumeSignal struct {
 	MinVolume      fixedpoint.Value `json:"minVolume"`
 	MinQuoteVolume fixedpoint.Value `json:"minQuoteVolume"`
 
+	Window          int    `json:"window"`
+	SmoothingWindow int    `json:"smoothingWindow"`
+	SmoothingType   string `json:"smoothingType"`
+
 	symbol string
 	book   *types.StreamOrderBook
+
+	bidVolumeIndicator types.Float64Calculator
+	askVolumeIndicator types.Float64Calculator
+
+	bidVolumeSeries *types.Float64Series
+	askVolumeSeries *types.Float64Series
 }
 
 func (s *OrderBookBestPriceVolumeSignal) ID() string {
@@ -56,7 +67,31 @@ func (s *OrderBookBestPriceVolumeSignal) Bind(ctx context.Context, session *bbgo
 
 	s.symbol = symbol
 	orderBookSignalMetrics.WithLabelValues(s.symbol).Set(0.0)
+
+	if s.Window > 0 {
+		s.bidVolumeSeries = types.NewFloat64Series()
+		s.bidVolumeIndicator = s.createVolumeIndicator(s.bidVolumeSeries)
+
+		s.askVolumeSeries = types.NewFloat64Series()
+		s.askVolumeIndicator = s.createVolumeIndicator(s.askVolumeSeries)
+	}
+
 	return nil
+}
+
+func (s *OrderBookBestPriceVolumeSignal) createVolumeIndicator(source types.Float64Source) types.Float64Calculator {
+	maxStream := indicatorv2.MAX(source, s.Window)
+	if s.SmoothingWindow > 0 {
+		switch s.SmoothingType {
+		case "rma":
+			return indicatorv2.RMA2(maxStream, s.SmoothingWindow, true)
+		case "ewma", "ema":
+			return indicatorv2.EWMA2(maxStream, s.SmoothingWindow)
+		default:
+			return indicatorv2.EWMA2(maxStream, s.SmoothingWindow)
+		}
+	}
+	return maxStream
 }
 
 func (s *OrderBookBestPriceVolumeSignal) CalculateSignal(ctx context.Context) (float64, error) {
@@ -65,13 +100,24 @@ func (s *OrderBookBestPriceVolumeSignal) CalculateSignal(ctx context.Context) (f
 		return 0.0, nil
 	}
 
+	bidVolume := bid.Volume
+	askVolume := ask.Volume
+
+	if s.bidVolumeSeries != nil {
+		s.bidVolumeSeries.PushAndEmit(bid.Volume.Float64())
+		s.askVolumeSeries.PushAndEmit(ask.Volume.Float64())
+
+		bidVolume = fixedpoint.NewFromFloat(s.bidVolumeIndicator.(types.Series).Index(0))
+		askVolume = fixedpoint.NewFromFloat(s.askVolumeIndicator.(types.Series).Index(0))
+	}
+
 	// TODO: may use scale to define this
-	sumVol := bid.Volume.Add(ask.Volume)
-	bidRatio := bid.Volume.Div(sumVol)
-	askRatio := ask.Volume.Div(sumVol)
+	sumVol := bidVolume.Add(askVolume)
+	bidRatio := bidVolume.Div(sumVol)
+	askRatio := askVolume.Div(sumVol)
 	denominator := fixedpoint.One.Sub(s.RatioThreshold)
 	signal := 0.0
-	if bid.Volume.Compare(s.MinVolume) < 0 && ask.Volume.Compare(s.MinVolume) < 0 {
+	if bidVolume.Compare(s.MinVolume) < 0 && askVolume.Compare(s.MinVolume) < 0 {
 		signal = 0.0
 	} else if bidRatio.Compare(s.RatioThreshold) >= 0 {
 		numerator := bidRatio.Sub(s.RatioThreshold)
@@ -83,8 +129,8 @@ func (s *OrderBookBestPriceVolumeSignal) CalculateSignal(ctx context.Context) (f
 
 	s.logger.Infof("[OrderBookBestPriceVolumeSignal] %f bid/ask = %f/%f, bid ratio = %f, ratio threshold = %f",
 		signal,
-		bid.Volume.Float64(),
-		ask.Volume.Float64(),
+		bidVolume.Float64(),
+		askVolume.Float64(),
 		bidRatio.Float64(),
 		s.RatioThreshold.Float64(),
 	)
