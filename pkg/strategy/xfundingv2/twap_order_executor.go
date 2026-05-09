@@ -224,8 +224,7 @@ func (o *TWAPExecutor) getTakerPrice(side types.SideType, orderBook types.OrderB
 		}
 		price := ask.Price
 		if o.syncState.Config.MaxSlippage.Sign() > 0 {
-			maxPrice := price.Mul(fixedpoint.One.Add(o.syncState.Config.MaxSlippage))
-			price = fixedpoint.Min(price, maxPrice)
+			price = price.Mul(fixedpoint.One.Add(o.syncState.Config.MaxSlippage))
 		}
 		return price, nil
 
@@ -236,8 +235,7 @@ func (o *TWAPExecutor) getTakerPrice(side types.SideType, orderBook types.OrderB
 		}
 		price := bid.Price
 		if o.syncState.Config.MaxSlippage.Sign() > 0 {
-			minPrice := price.Mul(fixedpoint.One.Sub(o.syncState.Config.MaxSlippage))
-			price = fixedpoint.Max(price, minPrice)
+			price = price.Mul(fixedpoint.One.Sub(o.syncState.Config.MaxSlippage))
 		}
 		return price, nil
 
