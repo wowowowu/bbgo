@@ -196,10 +196,12 @@ func (r *ArbitrageRound) NumHoldingIntervals(currentTime time.Time) int {
 	if r.syncState.StartTime.IsZero() {
 		return 0
 	}
-	// the funding rate has not flipped, check if the minimum holding time has passed
 	intervalDuration := time.Duration(r.syncState.FundingIntervalHours) * time.Hour
-	lastIntervalEnd := currentTime.Truncate(intervalDuration)
-	return int(lastIntervalEnd.Sub(r.syncState.FundingIntervalStart) / intervalDuration)
+	elapsed := currentTime.Sub(r.syncState.FundingIntervalStart)
+	if elapsed < 0 {
+		return 0
+	}
+	return int(elapsed / intervalDuration)
 }
 
 func (r *ArbitrageRound) MinHoldingIntervals() int {
