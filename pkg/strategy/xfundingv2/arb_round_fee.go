@@ -154,6 +154,7 @@ func (s *Strategy) calculateRoundFeeAsset(round *ArbitrageRound) error {
 		return nil
 	}
 
+	// overestimate the fee asset amount with taker fee rate
 	spotFeeRate := s.spotSession.TakerFeeRate
 	futuresFeeRate := s.futuresSession.TakerFeeRate
 

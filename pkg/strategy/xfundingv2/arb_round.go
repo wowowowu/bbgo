@@ -293,6 +293,10 @@ func (r *ArbitrageRound) HasOrder(orderID uint64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	return r.hasOrder(orderID)
+}
+
+func (r *ArbitrageRound) hasOrder(orderID uint64) bool {
 	_, spotExists := r.spotWorker.Executor().GetOrder(orderID)
 	_, futuresExists := r.futuresWorker.Executor().GetOrder(orderID)
 
@@ -411,7 +415,7 @@ func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Tim
 }
 
 func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Time) {
-	if trade.IsFutures || !r.HasOrder(trade.OrderID) {
+	if trade.IsFutures || !r.hasOrder(trade.OrderID) {
 		return
 	}
 
