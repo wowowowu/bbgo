@@ -407,6 +407,7 @@ func (s *Strategy) CrossRun(
 			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
 		}
 	}
+
 	// setup stream books for the symbols in the pending and active rounds but not in the candidate list.
 	// This ensures the strategy can keep running and update the states of the rounds even if the symbols are delisted from the market selection.
 	for symbol := range roundSymbols {
@@ -455,6 +456,7 @@ func (s *Strategy) CrossRun(
 	bbgo.OnShutdown(ctx, func(ctx context.Context, wg *sync.WaitGroup) {
 		defer wg.Done()
 		s.logger.Infof("shutting down %s", s.InstanceID())
+		// persist state
 		bbgo.Sync(ctx, s)
 		s.logger.Infof("state persisted for %s", s.InstanceID())
 	})
@@ -482,9 +484,10 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 	// remove closed active rounds
 	for _, round := range s.activeRounds {
 		if round.State() == RoundClosed {
-			s.handleRoundExit(ctx, round, tickTime)
+			s.logger.Infof("removing closed round: %s", round)
+			delete(s.activeRounds, round.SpotSymbol())
+			s.handleClosedRound(ctx, round, tickTime)
 		}
-		// TODO: insert closed round records into database
 	}
 
 	// 2. check if new round can be opened or existing round needs to be adjusted
@@ -869,7 +872,7 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 	return breakEvenIntervals, nil
 }
 
-func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound, tickTime time.Time) {
+func (s *Strategy) handleClosedRound(ctx context.Context, round *ArbitrageRound, tickTime time.Time) {
 	// stop the round
 	round.Stop()
 
@@ -896,11 +899,11 @@ func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound, t
 		}
 	}
 
-	s.logger.Infof("removing closed round: %s", round)
-	delete(s.activeRounds, round.SpotSymbol())
 	if executor, ok := s.spotGeneralOrderExecutors[s.FeeSymbol]; ok {
 		feeAvgCost := executor.Position().AverageCost
 		round.SetAvgFeeCost(s.FeeSymbol, feeAvgCost)
 	}
+	round.SyncFundingFeeRecords(ctx, tickTime)
 	bbgo.Notify(round.PnL(ctx, tickTime))
+	// TODO: insert closed round records into database
 }
