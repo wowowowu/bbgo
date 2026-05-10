@@ -109,8 +109,12 @@ func (s *Strategy) acquireFeeAssetAndTransfer(ctx context.Context, rounds []*Arb
 		// this case means the total fee asset balance is not sufficient
 		// need to buy and transfer in the fee asset to cover the deficit
 		buyQuantity = spotDeficit.Add(futuresDeficit) // must be positive or zero
-		transferAmount = fixedpoint.Max(fixedpoint.Zero, futuresDeficit)
-		transferDirection = types.TransferIn
+		transferAmount = futuresDeficit.Abs()
+		if futuresDeficit.Sign() > 0 {
+			transferDirection = types.TransferIn
+		} else if futuresDeficit.Sign() < 0 {
+			transferDirection = types.TransferOut
+		}
 	} else {
 		// this case means the total fee asset balance is sufficient
 		if futuresDeficit.Sign() > 0 {
