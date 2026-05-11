@@ -36,7 +36,10 @@ func TestArbitrageRound_MarshalUnmarshalJSON(t *testing.T) {
 						Time:   startTime,
 					},
 				},
-				Asset: "BTC",
+				Symbol:              "BTCUSDT",
+				SpotExchangeName:    types.ExchangeBinance,
+				FuturesExchangeName: types.ExchangeBinance,
+				Asset:               "BTC",
 
 				SpotFeeAssetAmount:    fixedpoint.NewFromFloat(0.01),
 				FuturesFeeAssetAmount: fixedpoint.NewFromFloat(0.02),
@@ -77,9 +80,11 @@ func TestArbitrageRound_MarshalUnmarshalJSON(t *testing.T) {
 		round := &ArbitrageRound{
 			syncState: ArbitrageRoundSyncState{
 				TriggeredFundingRate: fixedpoint.NewFromFloat(0.0005),
-				State:                RoundPending,
-				Asset:                "ETH",
-				FundingFeeRecords:    make(map[int64]FundingFee),
+				SpotExchangeName:    types.ExchangeBinance,
+				FuturesExchangeName: types.ExchangeBinance,
+				State:               RoundPending,
+				Asset:               "ETH",
+				FundingFeeRecords:   make(map[int64]FundingFee),
 			},
 		}
 
@@ -90,8 +95,8 @@ func TestArbitrageRound_MarshalUnmarshalJSON(t *testing.T) {
 		err = json.Unmarshal(data, &restored)
 		require.NoError(t, err)
 
-		assert.Nil(t, restored.syncState.SpotWorker)
-		assert.Nil(t, restored.syncState.FuturesWorker)
+		assert.Nil(t, restored.spotWorker)
+		assert.Nil(t, restored.futuresWorker)
 		assert.Equal(t, round.syncState, restored.syncState)
 	})
 

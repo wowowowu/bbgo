@@ -39,8 +39,8 @@ func (r *ArbitrageRound) LoadStrategy(ctx context.Context, s *Strategy) error {
 	} else {
 		return errors.New("[ArbitrageRound] futures exchange does not implement FuturesService")
 	}
-	if r.syncState.SpotWorker != nil {
-		if err := r.syncState.SpotWorker.LoadStrategy(ctx, s); err != nil {
+	if r.spotWorker != nil {
+		if err := r.spotWorker.LoadStrategy(ctx, s); err != nil {
 			return fmt.Errorf("[ArbitrageRound] spot load strategy error: %w", err)
 		}
 	} else {
@@ -49,8 +49,8 @@ func (r *ArbitrageRound) LoadStrategy(ctx context.Context, s *Strategy) error {
 		// the restored round should always have the spot worker restored as well.
 		return errors.New("[ArbitrageRound] spot worker is nil")
 	}
-	if r.syncState.FuturesWorker != nil {
-		if err := r.syncState.FuturesWorker.LoadStrategy(ctx, s); err != nil {
+	if r.futuresWorker != nil {
+		if err := r.futuresWorker.LoadStrategy(ctx, s); err != nil {
 			return fmt.Errorf("[ArbitrageRound] futures load strategy error: %w", err)
 		}
 	} else {
@@ -72,10 +72,10 @@ type ArbitrageRoundSyncState struct {
 	FundingIntervalEnd          time.Time            `json:"fundingIntervalEnd"`
 	FundingFeeRecords           map[int64]FundingFee `json:"fundingFeeRecords"`
 
-	Symbol        string      `json:"symbol"`
-	SpotWorker    *TWAPWorker `json:"spotWorker,omitempty"`
-	FuturesWorker *TWAPWorker `json:"futuresWorker,omitempty"`
-	Asset         string      `json:"asset"` // base asset, e.g. "BTC"
+	Symbol              string             `json:"symbol"`
+	SpotExchangeName    types.ExchangeName `json:"spotExchangeName"`
+	FuturesExchangeName types.ExchangeName `json:"futuresExchangeName"`
+	Asset               string             `json:"asset"` // base asset, e.g. "BTC"
 
 	SpotFeeAssetAmount    fixedpoint.Value `json:"spotFeeAssetAmount"`
 	FuturesFeeAssetAmount fixedpoint.Value `json:"futuresFeeAssetAmount"`
@@ -97,15 +97,29 @@ type ArbitrageRoundSyncState struct {
 }
 
 func (r *ArbitrageRound) MarshalJSON() ([]byte, error) {
-	return json.Marshal(r.syncState)
+	v := struct {
+		SyncState     ArbitrageRoundSyncState `json:"syncState"`
+		SpotWorker    *TWAPWorker             `json:"spotWorker,omitempty"`
+		FuturesWorker *TWAPWorker             `json:"futuresWorker,omitempty"`
+	}{
+		SyncState:     r.syncState,
+		SpotWorker:    r.spotWorker,
+		FuturesWorker: r.futuresWorker,
+	}
+	return json.Marshal(v)
 }
 
 func (r *ArbitrageRound) UnmarshalJSON(b []byte) error {
-	syncState := ArbitrageRoundSyncState{}
-	if err := json.Unmarshal(b, &syncState); err != nil {
+	v := struct {
+		SyncState     ArbitrageRoundSyncState `json:"syncState"`
+		SpotWorker    *TWAPWorker             `json:"spotWorker,omitempty"`
+		FuturesWorker *TWAPWorker             `json:"futuresWorker,omitempty"`
+	}{}
+	if err := json.Unmarshal(b, &v); err != nil {
 		return err
 	}
-
-	r.syncState = syncState
+	r.syncState = v.SyncState
+	r.spotWorker = v.SpotWorker
+	r.futuresWorker = v.FuturesWorker
 	return nil
 }
