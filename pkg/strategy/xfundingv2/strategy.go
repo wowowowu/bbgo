@@ -779,7 +779,7 @@ func (s *Strategy) selectMostProfitableMarket(candidates []MarketCandidate) *Mar
 			tradeQuoteBalance := quoteBalance.Available.Mul(s.MarketSelectionConfig.TradeBalanceRatio)
 			// long spot -> trade on the sell side of the order book
 			sellBook := s.spotOrderBooks[candidate.Symbol].SideBook(types.SideTypeSell)
-			spotPrice := sellBook.AverageDepthPriceByQuote(quoteBalance.Available, 0)
+			spotPrice := sellBook.AverageDepthPriceByQuote(tradeQuoteBalance, 0)
 			targetSize := tradeQuoteBalance.Div(spotPrice)
 			// short futures -> trade on the buy side of the order book
 			buyBook := s.futuresOrderBooks[candidate.Symbol].SideBook(types.SideTypeBuy)
@@ -867,7 +867,7 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 	amount := targetPosition.Abs().Mul(bestPrice)
 	estimateFundingFeePerInterval := amount.Mul(candidate.PremiumIndex.LastFundingRate.Abs())
 	if estimateFundingFeePerInterval.IsZero() {
-		return fixedpoint.Zero, nil
+		return fixedpoint.Zero, fmt.Errorf("estimated funding fee per interval is zero for candidate %s", candidate.Symbol)
 	}
 	breakEvenIntervals := totalCost.Div(estimateFundingFeePerInterval).Round(0, fixedpoint.Up)
 	return breakEvenIntervals, nil
