@@ -814,7 +814,8 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *Mar
 	if len(breakevenIntervals) == 0 {
 		return nil
 	}
-	sortedCandidates := candidates
+	// shallow copy the candidates slice
+	sortedCandidates := append([]MarketCandidate(nil), candidates...)
 	sort.Slice(sortedCandidates, func(i, j int) bool {
 		candidate1 := sortedCandidates[i]
 		candidate2 := sortedCandidates[j]
