@@ -13,38 +13,37 @@ import (
 )
 
 type TWAPExecutor struct {
-	TWAPWorkerConfig
+	mu sync.Mutex
 
-	mu  sync.Mutex
-	ctx context.Context
-
+	ctx      context.Context
 	exchange types.ExchangeOrderQueryService
-	market   types.Market
 	executor *bbgo.GeneralOrderExecutor
 
-	orders map[uint64]types.OrderQuery
-	trades map[uint64]types.Trade
+	syncState TWAPExecutorSyncState
 
 	logger logrus.FieldLogger
 }
 
-func NewTWAPOrderExecutor(
+func NewTWAPExecutor(
 	ctx context.Context,
 	exchange types.ExchangeOrderQueryService,
+	isFutures bool,
 	market types.Market,
 	executor *bbgo.GeneralOrderExecutor,
 	config TWAPWorkerConfig,
 ) *TWAPExecutor {
 	return &TWAPExecutor{
-		TWAPWorkerConfig: config,
-
 		ctx:      ctx,
 		exchange: exchange,
 		executor: executor,
-		market:   market,
 
-		orders: make(map[uint64]types.OrderQuery),
-		trades: make(map[uint64]types.Trade),
+		syncState: TWAPExecutorSyncState{
+			Config:    config,
+			Market:    market,
+			IsFutures: isFutures,
+			Orders:    make(map[uint64]types.OrderQuery),
+			Trades:    make(map[uint64]types.Trade),
+		},
 	}
 }
 
@@ -52,12 +51,16 @@ func (o *TWAPExecutor) SetLogger(logger logrus.FieldLogger) {
 	o.logger = logger
 }
 
+func (o *TWAPExecutor) Market() types.Market {
+	return o.syncState.Market
+}
+
 func (o *TWAPExecutor) Start() {
 	if o.logger == nil {
 		o.logger = logrus.WithFields(
 			logrus.Fields{
 				"component": "TWAPOrderExecutor",
-				"symbol":    o.market.Symbol,
+				"symbol":    o.syncState.Market.Symbol,
 			},
 		)
 	}
@@ -69,8 +72,8 @@ func (o *TWAPExecutor) AddTrade(trade types.Trade) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if _, exists := o.orders[trade.OrderID]; exists {
-		o.trades[trade.ID] = trade
+	if _, exists := o.syncState.Orders[trade.OrderID]; exists {
+		o.syncState.Trades[trade.ID] = trade
 	}
 }
 
@@ -121,7 +124,7 @@ func (o *TWAPExecutor) SyncOrder(order types.Order) error {
 }
 
 func (o *TWAPExecutor) GetOrder(orderID uint64) (types.Order, bool) {
-	if _, exists := o.orders[orderID]; !exists {
+	if _, exists := o.syncState.Orders[orderID]; !exists {
 		return types.Order{}, false
 	}
 	return o.executor.OrderStore().Get(orderID)
@@ -130,7 +133,7 @@ func (o *TWAPExecutor) GetOrder(orderID uint64) (types.Order, bool) {
 func (o *TWAPExecutor) AllOrders() []types.Order {
 	var orders []types.Order
 
-	for orderID := range o.orders {
+	for orderID := range o.syncState.Orders {
 		if order, exists := o.executor.OrderStore().Get(orderID); exists {
 			orders = append(orders, order)
 		}
@@ -140,7 +143,7 @@ func (o *TWAPExecutor) AllOrders() []types.Order {
 
 func (o *TWAPExecutor) AllTrades() []types.Trade {
 	var trades []types.Trade
-	for _, trade := range o.trades {
+	for _, trade := range o.syncState.Trades {
 		trades = append(trades, trade)
 	}
 	return trades
@@ -149,15 +152,15 @@ func (o *TWAPExecutor) AllTrades() []types.Trade {
 // place order
 func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType, orderBook types.OrderBook, deadlineExceeded bool) (*types.Order, error) {
 	// find the better price and submit new order
-	quantity = o.market.TruncateQuantity(quantity)
+	quantity = o.syncState.Market.TruncateQuantity(quantity)
 	price, err := o.GetPrice(side, orderBook)
 	if err != nil {
 		o.logger.WithError(err).Warn("[TWAP tick] failed to get price for active order update")
 		return nil, err
 	}
-	price = o.market.TruncatePrice(price)
+	price = o.syncState.Market.TruncatePrice(price)
 	order := o.buildSubmitOrder(quantity, price, side, deadlineExceeded)
-	if o.market.IsDustQuantity(order.Quantity, order.Price) {
+	if o.syncState.Market.IsDustQuantity(order.Quantity, order.Price) {
 		return nil, fmt.Errorf("order is of dust quantity: %s", quantity)
 	}
 
@@ -168,15 +171,15 @@ func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType
 	if err != nil || len(createdOrders) == 0 {
 		return nil, fmt.Errorf("failed to submit order: %+v, %v", order, err)
 	}
-	o.orders[createdOrders[0].OrderID] = createdOrders[0].AsQuery()
+	o.syncState.Orders[createdOrders[0].OrderID] = createdOrders[0].AsQuery()
 	return &createdOrders[0], nil
 }
 
 func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side types.SideType, deadlineExceeded bool) types.SubmitOrder {
 	if deadlineExceeded {
 		return types.SubmitOrder{
-			Symbol:   o.market.Symbol,
-			Market:   o.market,
+			Symbol:   o.syncState.Market.Symbol,
+			Market:   o.syncState.Market,
 			Side:     side,
 			Type:     types.OrderTypeMarket,
 			Quantity: quantity,
@@ -185,14 +188,14 @@ func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side t
 	orderType := types.OrderTypeLimitMaker
 	timeInForce := types.TimeInForceGTC
 
-	if o.OrderType == TWAPOrderTypeTaker {
+	if o.syncState.Config.OrderType == TWAPOrderTypeTaker {
 		orderType = types.OrderTypeLimit
 		timeInForce = types.TimeInForceIOC
 	}
 
 	return types.SubmitOrder{
-		Symbol:      o.market.Symbol,
-		Market:      o.market,
+		Symbol:      o.syncState.Market.Symbol,
+		Market:      o.syncState.Market,
 		Side:        side,
 		Type:        orderType,
 		Quantity:    quantity,
@@ -204,11 +207,11 @@ func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side t
 func (o *TWAPExecutor) GetPrice(side types.SideType, orderBook types.OrderBook) (price fixedpoint.Value, err error) {
 	defer func() {
 		if err == nil {
-			price = o.market.TruncatePrice(price)
+			price = o.syncState.Market.TruncatePrice(price)
 		}
 	}()
 
-	switch o.OrderType {
+	switch o.syncState.Config.OrderType {
 	case TWAPOrderTypeTaker:
 		return o.getTakerPrice(side, orderBook)
 	case TWAPOrderTypeMaker:
@@ -223,11 +226,11 @@ func (o *TWAPExecutor) getTakerPrice(side types.SideType, orderBook types.OrderB
 	case types.SideTypeBuy:
 		ask, ok := orderBook.BestAsk()
 		if !ok {
-			return fixedpoint.Zero, fmt.Errorf("no ask price available for %s", o.market.Symbol)
+			return fixedpoint.Zero, fmt.Errorf("no ask price available for %s", o.syncState.Market.Symbol)
 		}
 		price := ask.Price
-		if o.MaxSlippage.Sign() > 0 {
-			maxPrice := price.Mul(fixedpoint.One.Add(o.MaxSlippage))
+		if o.syncState.Config.MaxSlippage.Sign() > 0 {
+			maxPrice := price.Mul(fixedpoint.One.Add(o.syncState.Config.MaxSlippage))
 			price = fixedpoint.Min(price, maxPrice)
 		}
 		return price, nil
@@ -235,11 +238,11 @@ func (o *TWAPExecutor) getTakerPrice(side types.SideType, orderBook types.OrderB
 	case types.SideTypeSell:
 		bid, ok := orderBook.BestBid()
 		if !ok {
-			return fixedpoint.Zero, fmt.Errorf("no bid price available for %s", o.market.Symbol)
+			return fixedpoint.Zero, fmt.Errorf("no bid price available for %s", o.syncState.Market.Symbol)
 		}
 		price := bid.Price
-		if o.MaxSlippage.Sign() > 0 {
-			minPrice := price.Mul(fixedpoint.One.Sub(o.MaxSlippage))
+		if o.syncState.Config.MaxSlippage.Sign() > 0 {
+			minPrice := price.Mul(fixedpoint.One.Sub(o.syncState.Config.MaxSlippage))
 			price = fixedpoint.Max(price, minPrice)
 		}
 		return price, nil
@@ -250,15 +253,15 @@ func (o *TWAPExecutor) getTakerPrice(side types.SideType, orderBook types.OrderB
 }
 
 func (o *TWAPExecutor) getMakerPrice(side types.SideType, orderBook types.OrderBook) (fixedpoint.Value, error) {
-	tickSize := o.market.TickSize
-	numOfTicks := fixedpoint.NewFromInt(int64(o.NumOfTicks))
+	tickSize := o.syncState.Market.TickSize
+	numOfTicks := fixedpoint.NewFromInt(int64(o.syncState.Config.NumOfTicks))
 	tickImprovement := tickSize.Mul(numOfTicks)
 
 	switch side {
 	case types.SideTypeBuy:
 		bid, ok := orderBook.BestBid()
 		if !ok {
-			return fixedpoint.Zero, fmt.Errorf("no bid price available for %s", o.market.Symbol)
+			return fixedpoint.Zero, fmt.Errorf("no bid price available for %s", o.syncState.Market.Symbol)
 		}
 		// improve price by moving closer to spread
 		price := bid.Price.Add(tickImprovement)
@@ -272,7 +275,7 @@ func (o *TWAPExecutor) getMakerPrice(side types.SideType, orderBook types.OrderB
 	case types.SideTypeSell:
 		ask, ok := orderBook.BestAsk()
 		if !ok {
-			return fixedpoint.Zero, fmt.Errorf("no ask price available for %s", o.market.Symbol)
+			return fixedpoint.Zero, fmt.Errorf("no ask price available for %s", o.syncState.Market.Symbol)
 		}
 		price := ask.Price.Sub(tickImprovement)
 		bid, hasBid := orderBook.BestBid()

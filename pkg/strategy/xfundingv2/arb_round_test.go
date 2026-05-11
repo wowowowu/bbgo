@@ -76,7 +76,7 @@ func TestArbitrageRound_CollectedFunding(t *testing.T) {
 	})
 
 	t.Run("sums funding fee records", func(t *testing.T) {
-		round.startTime = time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
+		round.syncState.StartTime = time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
 
 		// Simulate funding fee income returned by the service
 		mockService.incomeHistory = []binanceapi.FuturesIncome{

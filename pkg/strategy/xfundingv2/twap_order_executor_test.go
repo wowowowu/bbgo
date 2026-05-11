@@ -40,9 +40,10 @@ func testExecutorSetup(
 	generalExecutor := bbgo.NewGeneralOrderExecutor(session, "BTCUSDT", "test", "test-instance", position)
 
 	ctx := context.Background()
-	executor := NewTWAPOrderExecutor(
+	executor := NewTWAPExecutor(
 		ctx,
 		mockOrderQuery,
+		false,
 		market,
 		generalExecutor,
 		config,
@@ -63,8 +64,8 @@ func TestNewTWAPOrderExecutor(t *testing.T) {
 	executor, _, _ := testExecutorSetup(t, ctrl, config)
 
 	assert.NotNil(t, executor)
-	assert.Equal(t, TWAPOrderTypeMaker, executor.OrderType)
-	assert.Equal(t, 2, executor.NumOfTicks)
+	assert.Equal(t, TWAPOrderTypeMaker, executor.syncState.Config.OrderType)
+	assert.Equal(t, 2, executor.syncState.Config.NumOfTicks)
 }
 
 func TestTWAPOrderExecutor_Start(t *testing.T) {
@@ -683,7 +684,7 @@ func TestTWAPOrderExecutor_GetOrder(t *testing.T) {
 			Symbol: "BTCUSDT",
 		},
 	}
-	executor.orders[order.OrderID] = order.AsQuery() // Add to ordersMap to simulate tracking
+	executor.syncState.Orders[order.OrderID] = order.AsQuery() // Add to ordersMap to simulate tracking
 	executor.executor.OrderStore().Add(order)
 
 	// Test GetOrder

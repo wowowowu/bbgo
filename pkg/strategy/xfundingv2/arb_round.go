@@ -34,46 +34,23 @@ type FuturesService interface {
 }
 
 type transferRetry struct {
-	Trade     types.Trade
-	LastTried time.Time
+	Trade     types.Trade `json:"trade"`
+	LastTried time.Time   `json:"lastTried"`
 }
 
 type ArbitrageRound struct {
 	mu sync.Mutex
 
-	triggeredFundingRate                     fixedpoint.Value
-	triggeredSpotTargetPosition              fixedpoint.Value
-	minHoldingIntervals                      int
-	fundingIntervalHours                     int
-	fundingIntervalStart, fundingIntervalEnd time.Time
-	fundingFeeRecords                        map[int64]FundingFee
+	syncState     ArbitrageRoundSyncState
+	spotWorker    *TWAPWorker
+	futuresWorker *TWAPWorker
 
-	// TWAP workers
-	spotWorker     *TWAPWorker
-	futuresWorker  *TWAPWorker
-	futuresService FuturesService
-	asset          string // base asset, e.g. "BTC"
-
-	spotFeeAssetAmount, futuresFeeAssetAmount     fixedpoint.Value
+	futuresService                                FuturesService
 	spotExchangeFeeRates, futuresExchangeFeeRates map[types.ExchangeName]types.ExchangeFee
-	feeSymbol                                     string
-	avgFeeCost                                    fixedpoint.Value
 
-	retryDuration      time.Duration
 	retryTransferTickC chan time.Time
-	retryTransfers     map[uint64]transferRetry
-
-	state RoundState
 
 	logger logrus.FieldLogger
-
-	// startTime is the time when the round is started
-	startTime time.Time
-	// closingTime is the time when the round is entered closing state
-	closingTime     time.Time
-	closingDuration time.Duration
-	// lastUpdateTime is the last time when the round is updated
-	lastUpdateTime time.Time
 }
 
 func NewArbitrageRound(
@@ -90,22 +67,24 @@ func NewArbitrageRound(
 	fundingIntervalStart := fundingRate.NextFundingTime.Add(-time.Duration(fundingIntervalHours) * time.Hour)
 	fundingIntervalEnd := fundingRate.NextFundingTime.Add(-time.Second)
 	return &ArbitrageRound{
-		triggeredFundingRate:        fundingRate.LastFundingRate,
-		triggeredSpotTargetPosition: spotTwap.TargetPosition(),
-		minHoldingIntervals:         minHoldingIntervals,
-		fundingIntervalHours:        fundingIntervalHours,
-		fundingIntervalStart:        fundingIntervalStart,
-		fundingIntervalEnd:          fundingIntervalEnd,
-		fundingFeeRecords:           make(map[int64]FundingFee),
+		syncState: ArbitrageRoundSyncState{
+			Symbol:                      spotTwap.Symbol(),
+			TriggeredFundingRate:        fundingRate.LastFundingRate,
+			TriggeredSpotTargetPosition: spotTwap.TargetPosition(),
+			MinHoldingIntervals:         minHoldingIntervals,
+			FundingIntervalHours:        fundingIntervalHours,
+			FundingIntervalStart:        fundingIntervalStart,
+			FundingIntervalEnd:          fundingIntervalEnd,
+			FundingFeeRecords:           make(map[int64]FundingFee),
 
-		spotWorker:    spotTwap,
-		futuresWorker: futuresTwap,
+			Asset:          asset,
+			State:          RoundPending,
+			RetryTransfers: make(map[uint64]transferRetry),
+		},
 
-		futuresService: futuresService,
-		asset:          asset,
-
-		state:              RoundPending,
-		retryTransfers:     make(map[uint64]transferRetry),
+		spotWorker:         spotTwap,
+		futuresWorker:      futuresTwap,
+		futuresService:     futuresService,
 		retryTransferTickC: make(chan time.Time, 1),
 	}
 }
@@ -119,36 +98,36 @@ func (r *ArbitrageRound) SetFuturesExchangeFeeRates(rates map[types.ExchangeName
 }
 
 func (r *ArbitrageRound) SetAvgFeeCost(feeSymbol string, cost fixedpoint.Value) {
-	r.feeSymbol = feeSymbol
-	r.avgFeeCost = cost
+	r.syncState.FeeSymbol = feeSymbol
+	r.syncState.AvgFeeCost = cost
 }
 
 func (r *ArbitrageRound) SetSpotFeeAssetAmount(amount fixedpoint.Value) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.spotFeeAssetAmount = amount
+	r.syncState.SpotFeeAssetAmount = amount
 }
 
 func (r *ArbitrageRound) SpotFeeAssetAmount() fixedpoint.Value {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.spotFeeAssetAmount
+	return r.syncState.SpotFeeAssetAmount
 }
 
 func (r *ArbitrageRound) SetFuturesFeeAssetAmount(amount fixedpoint.Value) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.futuresFeeAssetAmount = amount
+	r.syncState.FuturesFeeAssetAmount = amount
 }
 
 func (r *ArbitrageRound) FuturesFeeAssetAmount() fixedpoint.Value {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.futuresFeeAssetAmount
+	return r.syncState.FuturesFeeAssetAmount
 }
 
 // RequiredFeeAssetAmount returns the required fee asset amount for the round based on its current state and position.
@@ -157,16 +136,18 @@ func (r *ArbitrageRound) RequiredFeeAssetAmounts() (fixedpoint.Value, fixedpoint
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	halfSpotFee := r.spotFeeAssetAmount.Div(fixedpoint.Two)
-	halfFuturesFee := r.futuresFeeAssetAmount.Div(fixedpoint.Two)
-	switch r.state {
+	halfSpotFee := r.syncState.SpotFeeAssetAmount.Div(fixedpoint.Two)
+	halfFuturesFee := r.syncState.FuturesFeeAssetAmount.Div(fixedpoint.Two)
+	switch r.syncState.State {
 	case RoundPending:
-		return r.spotFeeAssetAmount, r.futuresFeeAssetAmount
+		return r.syncState.SpotFeeAssetAmount, r.syncState.FuturesFeeAssetAmount
 	case RoundOpening:
 		// calculate the executed ratio
 		executedRatio := fixedpoint.Zero
 		if !r.spotWorker.TargetPosition().IsZero() {
-			executedRatio = r.spotWorker.FilledPosition().Abs().Div(r.spotWorker.TargetPosition().Abs())
+			executedRatio = r.spotWorker.FilledPosition().
+				Abs().
+				Div(r.spotWorker.TargetPosition().Abs())
 		}
 		remainRatio := fixedpoint.Max(
 			fixedpoint.One.Sub(executedRatio),
@@ -177,8 +158,8 @@ func (r *ArbitrageRound) RequiredFeeAssetAmounts() (fixedpoint.Value, fixedpoint
 		return halfSpotFee.Mul(remainRatio), halfFuturesFee.Mul(remainRatio)
 	case RoundReady, RoundClosing:
 		executedRatio := fixedpoint.Zero
-		if !r.triggeredSpotTargetPosition.IsZero() {
-			executedRatio = r.spotWorker.FilledPosition().Abs().Div(r.triggeredSpotTargetPosition.Abs())
+		if !r.syncState.TriggeredSpotTargetPosition.IsZero() {
+			executedRatio = r.spotWorker.FilledPosition().Abs().Div(r.syncState.TriggeredSpotTargetPosition.Abs())
 		}
 		remainRatio := fixedpoint.Max(
 			fixedpoint.One.Sub(executedRatio),
@@ -191,25 +172,29 @@ func (r *ArbitrageRound) RequiredFeeAssetAmounts() (fixedpoint.Value, fixedpoint
 }
 
 func (r *ArbitrageRound) StartTime() time.Time {
-	return r.startTime
+	return r.syncState.StartTime
+}
+
+func (r *ArbitrageRound) HasStarted() bool {
+	return !r.syncState.StartTime.IsZero()
 }
 
 func (r *ArbitrageRound) TriggeredFundingRate() fixedpoint.Value {
-	return r.triggeredFundingRate
+	return r.syncState.TriggeredFundingRate
 }
 
 func (r *ArbitrageRound) NumHoldingIntervals(currentTime time.Time) int {
-	if r.startTime.IsZero() {
+	if r.syncState.StartTime.IsZero() {
 		return 0
 	}
 	// the funding rate has not flipped, check if the minimum holding time has passed
-	intervalDuration := time.Duration(r.fundingIntervalHours) * time.Hour
+	intervalDuration := time.Duration(r.syncState.FundingIntervalHours) * time.Hour
 	lastIntervalEnd := currentTime.Truncate(intervalDuration)
-	return int(lastIntervalEnd.Sub(r.fundingIntervalStart) / intervalDuration)
+	return int(lastIntervalEnd.Sub(r.syncState.FundingIntervalStart) / intervalDuration)
 }
 
 func (r *ArbitrageRound) MinHoldingIntervals() int {
-	return r.minHoldingIntervals
+	return r.syncState.MinHoldingIntervals
 }
 
 func (r *ArbitrageRound) TargetPosition() fixedpoint.Value {
@@ -217,32 +202,32 @@ func (r *ArbitrageRound) TargetPosition() fixedpoint.Value {
 }
 
 func (r *ArbitrageRound) LastUpdateTime() time.Time {
-	return r.lastUpdateTime
+	return r.syncState.LastUpdateTime
 }
 
 func (r *ArbitrageRound) SetUpdateTime(t time.Time) {
-	r.lastUpdateTime = t
+	r.syncState.LastUpdateTime = t
 }
 
 func (r *ArbitrageRound) String() string {
-	if r.state != RoundClosing {
+	if r.syncState.State != RoundClosing {
 		return fmt.Sprintf(
 			"ArbitrageRound(symbol=%s, state=%s, spot=%s, futures=%s, startTime=%s)",
 			r.spotWorker.Symbol(),
-			r.state,
+			r.syncState.State,
 			r.spotWorker.FilledPosition(),
 			r.futuresWorker.FilledPosition(),
-			r.startTime.Format(time.RFC3339),
+			r.syncState.StartTime.Format(time.RFC3339),
 		)
 	}
 	return fmt.Sprintf(
 		"ArbitrageRound(symbol=%s, state=%s, spot=%s, futures=%s, closingTime=%s, expectedCloseTime=%s)",
 		r.spotWorker.Symbol(),
-		r.state,
+		r.syncState.State,
 		r.spotWorker.FilledPosition(),
 		r.futuresWorker.FilledPosition(),
-		r.closingTime.Format(time.RFC3339),
-		r.closingTime.Add(r.closingDuration).Format(time.RFC3339),
+		r.syncState.ClosingTime.Format(time.RFC3339),
+		r.syncState.ClosingTime.Add(r.syncState.ClosingDuration).Format(time.RFC3339),
 	)
 }
 
@@ -250,7 +235,7 @@ func (r *ArbitrageRound) CollectedFunding(ctx context.Context, currentTime time.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.startTime.IsZero() {
+	if r.syncState.StartTime.IsZero() {
 		return fixedpoint.Zero
 	}
 	return r.collectedFunding(ctx, currentTime)
@@ -260,7 +245,7 @@ func (r *ArbitrageRound) collectedFunding(ctx context.Context, currentTime time.
 	r.syncFundingFeeRecords(ctx, currentTime)
 
 	var totalFunding fixedpoint.Value
-	for _, fee := range r.fundingFeeRecords {
+	for _, fee := range r.syncState.FundingFeeRecords {
 		totalFunding = totalFunding.Add(fee.Amount)
 	}
 	return totalFunding
@@ -308,7 +293,7 @@ func (r *ArbitrageRound) HasOrder(orderID uint64) bool {
 }
 
 func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime time.Time) {
-	if r.startTime.IsZero() || r.startTime.After(currentTime) {
+	if r.syncState.StartTime.IsZero() || r.syncState.StartTime.After(currentTime) {
 		return
 	}
 
@@ -316,7 +301,7 @@ func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime 
 		BinanceFuturesIncomeHistoryService: r.futuresService,
 	}
 	symbol := r.futuresWorker.Symbol()
-	dataC, errC := q.Query(ctx, symbol, binanceapi.FuturesIncomeFundingFee, r.startTime, currentTime)
+	dataC, errC := q.Query(ctx, symbol, binanceapi.FuturesIncomeFundingFee, r.syncState.StartTime, currentTime)
 	for {
 		select {
 		case <-ctx.Done():
@@ -334,7 +319,7 @@ func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime 
 					Txn:    income.TranId,
 					Time:   income.Time.Time(),
 				}
-				r.fundingFeeRecords[income.TranId] = record
+				r.syncState.FundingFeeRecords[income.TranId] = record
 			}
 		case err, ok := <-errC:
 			if !ok {
@@ -349,12 +334,12 @@ func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime 
 }
 
 func (r *ArbitrageRound) Start(ctx context.Context, currentTime time.Time) error {
-	if r.startTime.IsZero() {
-		if currentTime.After(r.fundingIntervalEnd) {
+	if r.syncState.StartTime.IsZero() {
+		if currentTime.After(r.syncState.FundingIntervalEnd) {
 			// the round is triggered after the funding interval -> error
 			return fmt.Errorf(
 				"the round is triggered after the funding interval end (%s): %s",
-				r.fundingIntervalEnd.Format(time.RFC3339),
+				r.syncState.FundingIntervalEnd.Format(time.RFC3339),
 				currentTime.Format(time.RFC3339),
 			)
 		}
@@ -365,10 +350,10 @@ func (r *ArbitrageRound) Start(ctx context.Context, currentTime time.Time) error
 			return fmt.Errorf("failed to start futures worker: %w", err)
 		}
 
-		go r.retryTransferWorker(ctx)
+		go r.retryTransferWorker(ctx, r.retryTransferTickC)
 
-		r.startTime = currentTime
-		r.state = RoundOpening
+		r.syncState.StartTime = currentTime
+		r.syncState.State = RoundOpening
 	}
 	return nil
 }
@@ -379,28 +364,27 @@ func (r *ArbitrageRound) Stop() {
 	close(r.retryTransferTickC)
 }
 
-func (r *ArbitrageRound) retryTransferWorker(ctx context.Context) {
+func (r *ArbitrageRound) retryTransferWorker(ctx context.Context, tickC <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case currentTime, ok := <-r.retryTransferTickC:
+		case currentTime, ok := <-tickC:
 			if !ok {
 				return
 			}
 			// retry failed transfers if any
 			r.mu.Lock()
-			for tradeID, transfer := range r.retryTransfers {
-				retryDuration := r.retryDuration
-				if retryDuration == 0 {
+			for tradeID, transfer := range r.syncState.RetryTransfers {
+				if r.syncState.RetryDuration == 0 {
 					// default retry duration is 10 minutes
-					retryDuration = 10 * time.Minute
+					r.syncState.RetryDuration = 10 * time.Minute
 				}
-				if currentTime.Sub(transfer.LastTried) < retryDuration {
+				if currentTime.Sub(transfer.LastTried) < r.syncState.RetryDuration {
 					continue
 				}
+				r.logger.Infof("retry transfer (trade: %d): %s %s", tradeID, transfer.Trade.Quantity.String(), r.syncState.Asset)
 				r.HandleSpotTrade(transfer.Trade, currentTime)
-				r.logger.Infof("retry transfer succeeded (trade: %d): %s %s", tradeID, transfer.Trade.Quantity.String(), r.asset)
 			}
 			r.mu.Unlock()
 		}
@@ -408,7 +392,7 @@ func (r *ArbitrageRound) retryTransferWorker(ctx context.Context) {
 }
 
 func (r *ArbitrageRound) SetRetryDuration(d time.Duration) {
-	r.retryDuration = d
+	r.syncState.RetryDuration = d
 }
 
 func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Time) {
@@ -425,27 +409,27 @@ func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Tim
 	// try to transfer asset from spot to futures.
 	// if transfer fails, retry in the next tick until it succeeds
 	if err := r.futuresService.TransferFuturesAccountAsset(
-		r.spotWorker.ctx, r.asset, trade.Quantity, types.TransferIn,
+		r.spotWorker.ctx, r.syncState.Asset, trade.Quantity, types.TransferIn,
 	); err != nil {
 		r.logger.WithError(err).Errorf("failed to transfer %s %s from futures to spot",
-			trade.Quantity, r.asset)
-		if _, found := r.retryTransfers[trade.ID]; !found {
+			trade.Quantity, r.syncState.Asset)
+		if _, found := r.syncState.RetryTransfers[trade.ID]; !found {
 			bbgo.Notify(
 				fmt.Errorf("transfer failed (%s %s), retrying: %w",
 					trade.Quantity.String(),
-					r.asset,
+					r.syncState.Asset,
 					err,
 				),
 			)
 		}
-		r.retryTransfers[trade.ID] = transferRetry{
+		r.syncState.RetryTransfers[trade.ID] = transferRetry{
 			Trade:     trade,
 			LastTried: currentTime,
 		}
 		return
 	}
 	// transfer succeeded, remove from retry list if exists
-	delete(r.retryTransfers, trade.ID)
+	delete(r.syncState.RetryTransfers, trade.ID)
 	r.syncFuturesPosition(trade)
 }
 
@@ -469,8 +453,12 @@ func (r *ArbitrageRound) FuturesSymbol() string {
 	return r.futuresWorker.Symbol()
 }
 
+func (r *ArbitrageRound) FuturesMarket() types.Market {
+	return r.futuresWorker.Market()
+}
+
 func (r *ArbitrageRound) State() RoundState {
-	return r.state
+	return r.syncState.State
 }
 
 func (r *ArbitrageRound) SetClosing(currentTime time.Time, duration time.Duration) {
@@ -482,13 +470,13 @@ func (r *ArbitrageRound) SetClosing(currentTime time.Time, duration time.Duratio
 	r.futuresWorker.SetTargetPosition(fixedpoint.Zero)
 	r.futuresWorker.ResetTime(currentTime, duration)
 
-	r.state = RoundClosing
-	r.closingTime = currentTime
-	r.closingDuration = duration
+	r.syncState.State = RoundClosing
+	r.syncState.ClosingTime = currentTime
+	r.syncState.ClosingDuration = duration
 }
 
 func (r *ArbitrageRound) AnnualizedRate() fixedpoint.Value {
-	return AnnualizedRate(r.triggeredFundingRate, r.fundingIntervalHours)
+	return AnnualizedRate(r.syncState.TriggeredFundingRate, r.syncState.FundingIntervalHours)
 }
 
 func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBook, futuresOrderBook types.OrderBook) {
@@ -498,7 +486,7 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 	defer func() {
 		// the state is PositionOpening
 		// check if the spot and futures positions are fully filled -> PositionReady
-		if r.state == RoundOpening {
+		if r.syncState.State == RoundOpening {
 			// get mid price
 			spotBid, _ := spotOrderBook.BestBid()
 			spotAsk, _ := spotOrderBook.BestAsk()
@@ -513,23 +501,23 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 			futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresRemaining.Abs(), futuresMidPrice)
 
 			if spotIsDust && futuresIsDust {
-				r.state = RoundReady
+				r.syncState.State = RoundReady
 				return
 			}
 		}
 
 		// the state is PositionClosing
 		// check if the spot and futures positions are fully closed -> PositionClosed
-		if r.state == RoundClosing {
+		if r.syncState.State == RoundClosing {
 			if r.spotWorker.FilledPosition().IsZero() && r.futuresWorker.FilledPosition().IsZero() {
-				r.state = RoundClosed
+				r.syncState.State = RoundClosed
 				r.logger.Infof("positions closed, arbitrage round completed: %s", r.spotWorker.Symbol())
 			}
 			return
 		}
 	}()
 
-	if r.state == RoundPending {
+	if r.syncState.State == RoundPending {
 		// not started yet, do nothing
 		return
 	}
@@ -541,7 +529,7 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 		})
 	}
 
-	if r.state == RoundClosed || r.state == RoundReady {
+	if r.syncState.State == RoundClosed || r.syncState.State == RoundReady {
 		return
 	}
 

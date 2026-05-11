@@ -11,9 +11,13 @@ import (
 )
 
 type PendingRound struct {
-	Round         *ArbitrageRound
-	RetryCount    int
-	LastRetryTime time.Time
+	Round         *ArbitrageRound `json:"round"`
+	RetryCount    int             `json:"retryCount"`
+	LastRetryTime time.Time       `json:"lastRetryTime"`
+}
+
+func (r *PendingRound) Initialize(ctx context.Context, s *Strategy) error {
+	return r.Round.Initialize(ctx, s)
 }
 
 func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Time) {

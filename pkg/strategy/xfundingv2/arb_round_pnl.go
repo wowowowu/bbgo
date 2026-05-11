@@ -54,12 +54,12 @@ func (r *ArbitrageRound) PnL(ctx context.Context, currentTime time.Time) RoundPn
 	if r.futuresExchangeFeeRates != nil {
 		futuresPosition.ExchangeFeeRates = r.futuresExchangeFeeRates
 	}
-	if !r.avgFeeCost.IsZero() {
+	if !r.syncState.AvgFeeCost.IsZero() {
 		spotPosition.FeeAverageCosts = map[string]fixedpoint.Value{
-			r.feeSymbol: r.avgFeeCost,
+			r.syncState.FeeSymbol: r.syncState.AvgFeeCost,
 		}
 		futuresPosition.FeeAverageCosts = map[string]fixedpoint.Value{
-			r.feeSymbol: r.avgFeeCost,
+			r.syncState.FeeSymbol: r.syncState.AvgFeeCost,
 		}
 	}
 
