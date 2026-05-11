@@ -23,6 +23,7 @@ import (
 	"github.com/c9s/bbgo/pkg/dynamic"
 	"github.com/c9s/bbgo/pkg/exchange/sandbox"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	indicatorv2 "github.com/c9s/bbgo/pkg/indicator/v2"
 	"github.com/c9s/bbgo/pkg/pricesolver"
 	"github.com/c9s/bbgo/pkg/profile/timeprofile"
 	"github.com/c9s/bbgo/pkg/risk/circuitbreaker"
@@ -100,6 +101,11 @@ type SignalMargin struct {
 	Threshold float64         `json:"threshold,omitempty"`
 }
 
+type AggregatedSignalConfig struct {
+	SmoothingWindow int                       `json:"smoothingWindow"`
+	SmoothingType   indicatorv2.SmoothingType `json:"smoothingType"`
+}
+
 type Strategy struct {
 	common.StrategyProfitFixer
 
@@ -141,6 +147,8 @@ type Strategy struct {
 
 	SignalReverseSideMargin       *SignalMargin `json:"signalReverseSideMargin,omitempty"`
 	SignalTrendSideMarginDiscount *SignalMargin `json:"signalTrendSideMarginDiscount,omitempty"`
+
+	AggregatedSignal *AggregatedSignalConfig `json:"aggregatedSignal,omitempty"`
 
 	// Margin is the default margin for the quote
 	Margin    fixedpoint.Value `json:"margin"`
@@ -287,6 +295,12 @@ type Strategy struct {
 	// lastAggregatedSignal stores the last aggregated signal with mutex
 	// TODO: use float64 series instead, so that we can store history signal values
 	lastAggregatedSignal MutexFloat64
+
+	// lastSmoothedAggregatedSignal stores the last smoothed aggregated signal with mutex
+	lastSmoothedAggregatedSignal MutexFloat64
+
+	aggregatedSignalSeries    *types.Float64Series
+	aggregatedSignalIndicator types.Float64Calculator
 
 	// lastDirectionDivergence stores the latest D2 value
 	lastDirectionDivergence MutexFloat64
@@ -498,6 +512,11 @@ func (s *Strategy) Initialize() error {
 		}
 	}
 
+	if s.AggregatedSignal != nil && s.AggregatedSignal.SmoothingWindow > 0 {
+		s.aggregatedSignalSeries = types.NewFloat64Series()
+		s.aggregatedSignalIndicator = indicatorv2.NewSmoothedIndicator(s.aggregatedSignalSeries, 0, s.AggregatedSignal.SmoothingWindow, s.AggregatedSignal.SmoothingType)
+	}
+
 	s.positionExposure = bbgo.NewPositionExposure(s.Symbol)
 	s.positionExposure.SetLogger(s.logger)
 	s.positionExposure.SetMetricsLabels(ID, s.InstanceID(), s.MakerExchange, s.Symbol)
@@ -561,14 +580,7 @@ func (s *Strategy) getPositionHoldingPeriod(now time.Time) (time.Duration, bool)
 }
 
 func (s *Strategy) applySignalMargin(ctx context.Context, quote *Quote) error {
-	sig, err := s.AggregateSignal(ctx)
-	if err != nil {
-		return err
-	}
-
-	s.lastAggregatedSignal.Set(sig)
-	s.logger.Infof("aggregated signal: %f", sig)
-
+	sig := s.lastSmoothedAggregatedSignal.Get()
 	if sig == 0.0 {
 		return nil
 	}
@@ -991,7 +1003,22 @@ func (s *Strategy) updateQuote(ctx context.Context) error {
 	}
 
 	s.logger.Infof("aggregated signal: %f", sig)
+	s.lastAggregatedSignal.Set(sig)
 	s.aggregatedSignalMetrics.Set(sig)
+
+	smoothedSig := sig
+	if s.aggregatedSignalIndicator != nil {
+		s.aggregatedSignalSeries.PushAndEmit(sig)
+		smoothedSig = s.aggregatedSignalIndicator.(types.Series).Index(0)
+	}
+	s.lastSmoothedAggregatedSignal.Set(smoothedSig)
+
+	// apply signal margin
+	if s.EnableSignalMargin {
+		if err := s.applySignalMargin(ctx, nil); err != nil {
+			s.logger.WithError(err).Errorf("unable to apply signal margin")
+		}
+	}
 
 	now := time.Now()
 	if s.CircuitBreaker != nil {
@@ -2016,7 +2043,7 @@ func (s *Strategy) hedge(ctx context.Context) {
 	)
 
 	lastPrice := s.lastPrice.Get()
-	sig := s.lastAggregatedSignal.Get()
+	sig := s.lastSmoothedAggregatedSignal.Get()
 
 	if lastPrice.IsZero() {
 		s.logger.Warnf("last price is zero, skip hedging")
@@ -2271,6 +2298,13 @@ func (s *Strategy) Defaults() error {
 
 	if s.HedgeInterval == 0 {
 		s.HedgeInterval = types.Duration(10 * time.Second)
+	}
+
+	if s.AggregatedSignal == nil {
+		s.AggregatedSignal = &AggregatedSignalConfig{
+			SmoothingWindow: 0,
+			SmoothingType:   indicatorv2.SmoothingTypeEMA,
+		}
 	}
 
 	if s.NumLayers == 0 {
