@@ -10,7 +10,7 @@ import (
 	"github.com/c9s/bbgo/pkg/types"
 )
 
-func (w *TWAPWorker) LoadStrategy(ctx context.Context, s *Strategy) error {
+func (w *TWAPWorker) Initialize(ctx context.Context, s *Strategy) error {
 	if w.syncState.TWAPExecutor == nil {
 		// should not happen
 		return fmt.Errorf("[TWAPWorker] TWAPExecutor is nil")
@@ -18,7 +18,7 @@ func (w *TWAPWorker) LoadStrategy(ctx context.Context, s *Strategy) error {
 
 	w.ctx = ctx
 	w.SetLogger(s.logger)
-	if err := w.syncState.TWAPExecutor.LoadStrategy(s); err != nil {
+	if err := w.syncState.TWAPExecutor.Initialize(s); err != nil {
 		return fmt.Errorf("[TWAPWorker] failed to load TWAPExecutor: %w", err)
 	}
 	if w.syncState.ActiveOrder != nil {

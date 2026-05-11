@@ -11,7 +11,7 @@ import (
 	"github.com/c9s/bbgo/pkg/types"
 )
 
-func (r *ArbitrageRound) LoadStrategy(ctx context.Context, s *Strategy) error {
+func (r *ArbitrageRound) Initialize(ctx context.Context, s *Strategy) error {
 	r.SetLogger(s.logger)
 	r.SetFuturesExchangeFeeRates(
 		map[types.ExchangeName]types.ExchangeFee{
@@ -40,7 +40,7 @@ func (r *ArbitrageRound) LoadStrategy(ctx context.Context, s *Strategy) error {
 		return errors.New("[ArbitrageRound] futures exchange does not implement FuturesService")
 	}
 	if r.spotWorker != nil {
-		if err := r.spotWorker.LoadStrategy(ctx, s); err != nil {
+		if err := r.spotWorker.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("[ArbitrageRound] spot load strategy error: %w", err)
 		}
 	} else {
@@ -50,7 +50,7 @@ func (r *ArbitrageRound) LoadStrategy(ctx context.Context, s *Strategy) error {
 		return errors.New("[ArbitrageRound] spot worker is nil")
 	}
 	if r.futuresWorker != nil {
-		if err := r.futuresWorker.LoadStrategy(ctx, s); err != nil {
+		if err := r.futuresWorker.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("[ArbitrageRound] futures load strategy error: %w", err)
 		}
 	} else {

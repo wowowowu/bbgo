@@ -17,7 +17,7 @@ type TWAPExecutorSyncState struct {
 	Trades    map[uint64]types.Trade      `json:"trades,omitempty"`
 }
 
-func (o *TWAPExecutor) LoadStrategy(s *Strategy) error {
+func (o *TWAPExecutor) Initialize(s *Strategy) error {
 	o.SetLogger(s.logger)
 	var session *bbgo.ExchangeSession
 	var executor *bbgo.GeneralOrderExecutor

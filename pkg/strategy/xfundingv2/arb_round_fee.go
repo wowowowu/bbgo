@@ -16,8 +16,8 @@ type PendingRound struct {
 	LastRetryTime time.Time       `json:"lastRetryTime"`
 }
 
-func (r *PendingRound) LoadStrategy(ctx context.Context, s *Strategy) error {
-	return r.Round.LoadStrategy(ctx, s)
+func (r *PendingRound) Initialize(ctx context.Context, s *Strategy) error {
+	return r.Round.Initialize(ctx, s)
 }
 
 func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Time) {

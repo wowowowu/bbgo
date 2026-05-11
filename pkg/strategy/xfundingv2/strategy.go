@@ -381,12 +381,12 @@ func (s *Strategy) CrossRun(
 
 	// runtime init done, load pending and active rounds
 	for symbol, pendingRound := range s.pendingRounds {
-		if err := pendingRound.LoadStrategy(ctx, s); err != nil {
+		if err := pendingRound.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("failed to restore pending round (%s): %w", symbol, err)
 		}
 	}
 	for symbol, activeRound := range s.activeRounds {
-		if err := activeRound.LoadStrategy(ctx, s); err != nil {
+		if err := activeRound.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
 		}
 	}
