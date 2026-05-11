@@ -215,7 +215,7 @@ func (s *Strategy) CrossRun(
 		return fmt.Errorf("spot session %s not found", s.SpotSession)
 	}
 	if futuresEx, ok := s.futuresSession.Exchange.(types.FuturesExchange); !ok {
-		return fmt.Errorf("sessioin %s does not support futures", s.futuresSession.Name)
+		return fmt.Errorf("session %s does not support futures", s.futuresSession.Name)
 	} else if !futuresEx.GetFuturesSettings().IsFutures {
 		return fmt.Errorf("session %s is not configured for futures trading", s.futuresSession.Name)
 	}
@@ -622,7 +622,7 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 			return
 		}
 
-		selectedCandidate := s.selectMostPorfitableMarket(candidates)
+		selectedCandidate := s.selectMostProfitableMarket(candidates)
 		if selectedCandidate == nil {
 			// no profitable candidate found, nothing to do
 			return
@@ -758,7 +758,7 @@ func (s *Strategy) filterMarketCollateralRate(ctx context.Context, symbols []str
 // selectMostProfitableMarket selects the most profitable market among the candidates based on the estimated break-even holding intervals
 // it will also return the target position for the futures trade
 // the most profitable market is the one with the shortest break-even holding intervals
-func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *MarketCandidate {
+func (s *Strategy) selectMostProfitableMarket(candidates []MarketCandidate) *MarketCandidate {
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -849,13 +849,13 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 		return fixedpoint.Zero, errors.New("order book not found for candidate symbol")
 	}
 	spotOrderBookSnapshot := spotOrderBook.Copy()
-	futuresOrderBookShapshot := futuresOrderBook.Copy()
+	futuresOrderBookSnapshot := futuresOrderBook.Copy()
 
-	estimateEntryCost, err := s.costEstimator.EstimateEntryCost(true, spotOrderBookSnapshot, futuresOrderBookShapshot)
+	estimateEntryCost, err := s.costEstimator.EstimateEntryCost(true, spotOrderBookSnapshot, futuresOrderBookSnapshot)
 	if err != nil {
 		return fixedpoint.Zero, err
 	}
-	estimateExitCost, err := s.costEstimator.EstimateExitCost(true, spotOrderBookSnapshot, futuresOrderBookShapshot)
+	estimateExitCost, err := s.costEstimator.EstimateExitCost(true, spotOrderBookSnapshot, futuresOrderBookSnapshot)
 	if err != nil {
 		return fixedpoint.Zero, err
 	}
