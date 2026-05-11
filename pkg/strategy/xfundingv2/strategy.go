@@ -12,7 +12,6 @@ import (
 
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/datasource/coinmarketcap"
-	"github.com/c9s/bbgo/pkg/exchange/binance"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/sirupsen/logrus"
@@ -353,8 +352,11 @@ func (s *Strategy) CrossRun(
 		s.spotGeneralOrderExecutors[s.FeeSymbol] = spotExecutor
 	}
 
-	binanceEx, _ := s.futuresSession.Exchange.(*binance.Exchange)
-	s.preliminaryMarketSelector = NewMarketSelector(*s.MarketSelectionConfig, binanceEx, s.logger)
+	if futuresInfoService, ok := s.futuresSession.Exchange.(FuturesInfoService); !ok {
+		return fmt.Errorf("futures session exchange does not support futures info service: %s", s.futuresSession.ExchangeName)
+	} else {
+		s.preliminaryMarketSelector = NewMarketSelector(*s.MarketSelectionConfig, futuresInfoService, s.logger)
+	}
 
 	// initialize depth books for model selection
 	// we create new stream here to save the bandwidth of the market data stream of the sessions
@@ -648,6 +650,8 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 			}
 			round := NewArbitrageRound(
 				selectedCandidate.PremiumIndex,
+				s.spotSession.Exchange.Name(),
+				s.futuresSession.Exchange.Name(),
 				selectedCandidate.MinHoldingIntervals,
 				selectedCandidate.FundingIntervalHours,
 				spotTwap,
@@ -656,19 +660,15 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 			)
 			round.SetLogger(s.logger)
 			round.SetSpotExchangeFeeRates(
-				map[types.ExchangeName]types.ExchangeFee{
-					s.spotSession.ExchangeName: {
-						MakerFeeRate: s.spotSession.MakerFeeRate,
-						TakerFeeRate: s.spotSession.TakerFeeRate,
-					},
+				types.ExchangeFee{
+					MakerFeeRate: s.spotSession.MakerFeeRate,
+					TakerFeeRate: s.spotSession.TakerFeeRate,
 				},
 			)
 			round.SetFuturesExchangeFeeRates(
-				map[types.ExchangeName]types.ExchangeFee{
-					s.futuresSession.ExchangeName: {
-						MakerFeeRate: s.futuresSession.MakerFeeRate,
-						TakerFeeRate: s.futuresSession.TakerFeeRate,
-					},
+				types.ExchangeFee{
+					MakerFeeRate: s.futuresSession.MakerFeeRate,
+					TakerFeeRate: s.futuresSession.TakerFeeRate,
 				},
 			)
 			// save as pending round for the fee asset preparation

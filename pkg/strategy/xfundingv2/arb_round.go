@@ -54,8 +54,11 @@ type ArbitrageRound struct {
 }
 
 func NewArbitrageRound(
-	fundingRate *types.PremiumIndex, minHoldingIntervals, fundingIntervalHours int,
-	spotTwap, futuresTwap *TWAPWorker, futuresService FuturesService) *ArbitrageRound {
+	fundingRate *types.PremiumIndex,
+	spotExchangeName, futuresExchangeName types.ExchangeName,
+	minHoldingIntervals, fundingIntervalHours int,
+	spotTwap, futuresTwap *TWAPWorker,
+	futuresService FuturesService) *ArbitrageRound {
 	var asset string
 	if spotTwap.TargetPosition().Sign() > 0 {
 		// long spot, short futures -> collateral is base asset
@@ -77,9 +80,11 @@ func NewArbitrageRound(
 			FundingIntervalEnd:          fundingIntervalEnd,
 			FundingFeeRecords:           make(map[int64]FundingFee),
 
-			Asset:          asset,
-			State:          RoundPending,
-			RetryTransfers: make(map[uint64]transferRetry),
+			SpotExchangeName:    spotExchangeName,
+			FuturesExchangeName: futuresExchangeName,
+			Asset:               asset,
+			State:               RoundPending,
+			RetryTransfers:      make(map[uint64]transferRetry),
 		},
 
 		spotWorker:         spotTwap,
@@ -89,12 +94,16 @@ func NewArbitrageRound(
 	}
 }
 
-func (r *ArbitrageRound) SetSpotExchangeFeeRates(rates map[types.ExchangeName]types.ExchangeFee) {
-	r.spotExchangeFeeRates = rates
+func (r *ArbitrageRound) SetSpotExchangeFeeRates(fee types.ExchangeFee) {
+	r.spotExchangeFeeRates = map[types.ExchangeName]types.ExchangeFee{
+		r.syncState.SpotExchangeName: fee,
+	}
 }
 
-func (r *ArbitrageRound) SetFuturesExchangeFeeRates(rates map[types.ExchangeName]types.ExchangeFee) {
-	r.futuresExchangeFeeRates = rates
+func (r *ArbitrageRound) SetFuturesExchangeFeeRates(fee types.ExchangeFee) {
+	r.futuresExchangeFeeRates = map[types.ExchangeName]types.ExchangeFee{
+		r.syncState.FuturesExchangeName: fee,
+	}
 }
 
 func (r *ArbitrageRound) SetAvgFeeCost(feeSymbol string, cost fixedpoint.Value) {
@@ -442,6 +451,9 @@ func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Tim
 }
 
 func (r *ArbitrageRound) HandleFuturesTrade(trade types.Trade, currentTime time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if trade.Symbol != r.futuresWorker.Symbol() || !trade.IsFutures {
 		return
 	}
@@ -466,6 +478,9 @@ func (r *ArbitrageRound) FuturesMarket() types.Market {
 }
 
 func (r *ArbitrageRound) State() RoundState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	return r.syncState.State
 }
 
@@ -492,17 +507,17 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 	defer r.mu.Unlock()
 
 	defer func() {
+		// get mid price
+		spotBid, _ := spotOrderBook.BestBid()
+		spotAsk, _ := spotOrderBook.BestAsk()
+		futuresBid, _ := futuresOrderBook.BestBid()
+		futuresAsk, _ := futuresOrderBook.BestAsk()
+		spotMidPrice := spotBid.Price.Add(spotAsk.Price).Div(fixedpoint.Two)
+		futuresMidPrice := futuresBid.Price.Add(futuresAsk.Price).Div(fixedpoint.Two)
+
 		// the state is PositionOpening
 		// check if the spot and futures positions are fully filled -> PositionReady
 		if r.syncState.State == RoundOpening {
-			// get mid price
-			spotBid, _ := spotOrderBook.BestBid()
-			spotAsk, _ := spotOrderBook.BestAsk()
-			futuresBid, _ := futuresOrderBook.BestBid()
-			futuresAsk, _ := futuresOrderBook.BestAsk()
-			spotMidPrice := spotBid.Price.Add(spotAsk.Price).Div(fixedpoint.Two)
-			futuresMidPrice := futuresBid.Price.Add(futuresAsk.Price).Div(fixedpoint.Two)
-
 			spotRemaining := r.spotWorker.RemainingQuantity()
 			futuresRemaining := r.futuresWorker.RemainingQuantity()
 			spotIsDust := r.spotWorker.Market().IsDustQuantity(spotRemaining.Abs(), spotMidPrice)
@@ -517,7 +532,12 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 		// the state is PositionClosing
 		// check if the spot and futures positions are fully closed -> PositionClosed
 		if r.syncState.State == RoundClosing {
-			if r.spotWorker.FilledPosition().IsZero() && r.futuresWorker.FilledPosition().IsZero() {
+			spotFilled := r.spotWorker.FilledPosition()
+			futuresFilled := r.futuresWorker.FilledPosition()
+			spotIsDust := r.spotWorker.Market().IsDustQuantity(spotFilled.Abs(), spotMidPrice)
+			futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresFilled.Abs(), futuresMidPrice)
+
+			if spotIsDust && futuresIsDust {
 				r.syncState.State = RoundClosed
 				r.logger.Infof("positions closed, arbitrage round completed: %s", r.spotWorker.Symbol())
 			}

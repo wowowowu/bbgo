@@ -57,7 +57,10 @@ func newTestArbitrageRound(t *testing.T, ctrl *gomock.Controller, fundingInterva
 		NextFundingTime: nextFundingTime,
 	}
 
-	round := NewArbitrageRound(fundingRate, minHoldingIntervals, fundingIntervalHours, spotWorker, futuresWorker, mockService)
+	round := NewArbitrageRound(
+		fundingRate,
+		types.ExchangeBinance, types.ExchangeBinance,
+		minHoldingIntervals, fundingIntervalHours, spotWorker, futuresWorker, mockService)
 	return round, mockService
 }
 

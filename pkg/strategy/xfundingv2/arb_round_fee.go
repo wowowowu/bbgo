@@ -33,9 +33,10 @@ func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Ti
 			pendingRounds = append(pendingRounds, pendingRound)
 		}
 	}
-	var processedRounds []*ArbitrageRound
+	var processedRounds []*PendingRound
 	if s.FeeSymbol != "" {
 		// prepare fee asset for the pending rounds
+		var allRounds []*ArbitrageRound
 		for _, pendingRound := range pendingRounds {
 			// calculate the fee asset required for the round
 			if err := s.calculateRoundFeeAsset(pendingRound.Round); err != nil {
@@ -47,14 +48,13 @@ func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Ti
 				pendingRound.LastRetryTime = currentTime
 				continue
 			}
-			processedRounds = append(processedRounds, pendingRound.Round)
+			processedRounds = append(processedRounds, pendingRound)
+			allRounds = append(allRounds, pendingRound.Round)
 		}
 		// include the active rounds into fee asset preparation
-		var activeRounds []*ArbitrageRound
 		for _, activeRound := range s.activeRounds {
-			activeRounds = append(activeRounds, activeRound)
+			allRounds = append(allRounds, activeRound)
 		}
-		allRounds := append(processedRounds, activeRounds...)
 		if err := s.acquireFeeAssetAndTransfer(ctx, allRounds); err != nil {
 			s.logger.WithError(err).Error("failed to acquire fee asset and transfer for pending rounds")
 			for _, pendingRound := range pendingRounds {
@@ -66,17 +66,20 @@ func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Ti
 	} else {
 		// fee asset is not required, adding all pending rounds to the next step
 		for _, pendingRound := range pendingRounds {
-			processedRounds = append(processedRounds, pendingRound.Round)
+			processedRounds = append(processedRounds, pendingRound)
 		}
 	}
 
 	// start the processed rounds and move them to active round list
-	for _, round := range processedRounds {
+	for _, pendingRound := range processedRounds {
+		round := pendingRound.Round
 		if err := round.Start(ctx, currentTime); err != nil {
 			s.logger.WithError(err).Errorf(
 				"failed to start round after fee asset preparation: %s",
 				round,
 			)
+			pendingRound.RetryCount++
+			pendingRound.LastRetryTime = currentTime
 			continue
 		}
 		// move to active round list

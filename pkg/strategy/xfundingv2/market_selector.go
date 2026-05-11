@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/c9s/bbgo/pkg/exchange/binance"
 	"github.com/c9s/bbgo/pkg/exchange/binance/binanceapi"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
@@ -95,18 +94,26 @@ type MarketCandidate struct {
 	MinHoldingIntervals int
 }
 
+type FuturesInfoService interface {
+	QueryTakerBuySellVolumes(context.Context, string, types.Interval, types.TradeQueryOptions) ([]binanceapi.FuturesTakerBuySellVolume, error)
+	QueryPremiumIndex(context.Context, string) (*types.PremiumIndex, error)
+	QueryDepth(context.Context, string) (types.SliceOrderBook, int64, error)
+	QueryFuturesFundingInfo(context.Context) ([]binanceapi.FuturesFundingInfo, error)
+	QueryTicker(context.Context, string) (*types.Ticker, error)
+}
+
 // MarketSelector selects the best market based on funding rate and liquidity
 type MarketSelector struct {
 	MarketSelectionConfig
-	binanceFutures *binance.Exchange
-	logger         logrus.FieldLogger
+	service FuturesInfoService
+	logger  logrus.FieldLogger
 }
 
 // NewMarketSelector creates a new MarketSelector
-func NewMarketSelector(config MarketSelectionConfig, exchange *binance.Exchange, logger logrus.FieldLogger) *MarketSelector {
+func NewMarketSelector(config MarketSelectionConfig, exchange FuturesInfoService, logger logrus.FieldLogger) *MarketSelector {
 	return &MarketSelector{
 		MarketSelectionConfig: config,
-		binanceFutures:        exchange,
+		service:               exchange,
 		logger:                logger,
 	}
 }
@@ -114,13 +121,13 @@ func NewMarketSelector(config MarketSelectionConfig, exchange *binance.Exchange,
 // SelectMarkets returns a list of market candidates that meet the selection criteria
 func (s *MarketSelector) SelectMarkets(ctx context.Context, symbols []string) ([]MarketCandidate, error) {
 	// Step 1: Query premium indexes for each symbol
-	indices, err := queryFundingRates(ctx, s.binanceFutures, s.logger, symbols)
+	indices, err := queryFundingRates(ctx, s.service, s.logger, symbols)
 	if err != nil {
 		return nil, err
 	}
 
 	// Step 2: Get funding info
-	fundingInfos, err := queryFundingInfo(ctx, s.binanceFutures)
+	fundingInfos, err := queryFundingInfo(ctx, s.service)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +137,7 @@ func (s *MarketSelector) SelectMarkets(ctx context.Context, symbols []string) ([
 	// query the volume data
 	takerQuoteVolumes := make(map[string]fixedpoint.Value)
 	for _, symbol := range symbols {
-		takerVals, err := s.binanceFutures.QueryTakerBuySellVolumes(
+		takerVals, err := s.service.QueryTakerBuySellVolumes(
 			ctx,
 			symbol,
 			types.Interval1d,
@@ -139,7 +146,7 @@ func (s *MarketSelector) SelectMarkets(ctx context.Context, symbols []string) ([
 		if err != nil || len(takerVals) == 0 {
 			return nil, err
 		}
-		ticker, err := s.binanceFutures.QueryTicker(ctx, symbol)
+		ticker, err := s.service.QueryTicker(ctx, symbol)
 		if err != nil {
 			return nil, err
 		}
@@ -165,7 +172,7 @@ func (s *MarketSelector) SelectMarkets(ctx context.Context, symbols []string) ([
 		}
 
 		// exclude symbols with low liquidity in order book
-		book, _, err := s.binanceFutures.QueryDepth(ctx, idx.Symbol)
+		book, _, err := s.service.QueryDepth(ctx, idx.Symbol)
 		if err != nil {
 			s.logger.WithError(err).Warnf("failed to query order book for %s, skipping liquidity filter", idx.Symbol)
 			continue
@@ -202,11 +209,11 @@ func (s *MarketSelector) SelectMarkets(ctx context.Context, symbols []string) ([
 }
 
 // queryFundingRates queries funding rates for the given symbols
-func queryFundingRates(ctx context.Context, futuresExchange *binance.Exchange, logger logrus.FieldLogger, symbols []string) ([]*types.PremiumIndex, error) {
+func queryFundingRates(ctx context.Context, service FuturesInfoService, logger logrus.FieldLogger, symbols []string) ([]*types.PremiumIndex, error) {
 	indices := make([]*types.PremiumIndex, 0, len(symbols))
 
 	for _, symbol := range symbols {
-		idx, err := futuresExchange.QueryPremiumIndex(ctx, symbol)
+		idx, err := service.QueryPremiumIndex(ctx, symbol)
 		if err != nil || idx == nil {
 			// Log error but continue with other symbols
 			logger.WithError(err).Warnf("failed to query latest funding rates for %s", symbol)
@@ -218,9 +225,9 @@ func queryFundingRates(ctx context.Context, futuresExchange *binance.Exchange, l
 	return indices, nil
 }
 
-func queryFundingInfo(ctx context.Context, futuresExchange *binance.Exchange) (map[string]*binanceapi.FuturesFundingInfo, error) {
+func queryFundingInfo(ctx context.Context, service FuturesInfoService) (map[string]*binanceapi.FuturesFundingInfo, error) {
 	m := make(map[string]*binanceapi.FuturesFundingInfo)
-	fundingInfos, err := futuresExchange.QueryFuturesFundingInfo(ctx)
+	fundingInfos, err := service.QueryFuturesFundingInfo(ctx)
 	if err != nil {
 		return nil, err
 	}
