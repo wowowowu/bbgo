@@ -108,7 +108,7 @@ func TestTWAPWorker_FillingOrders(t *testing.T) {
 		// Target position: buy 5 BTC total
 		targetPosition := Number(5.0)
 		worker.SetTargetPosition(targetPosition)
-		assert.Equal(t, types.SideTypeBuy, orderSide(worker.remainingQuantity()))
+		assert.Equal(t, types.SideTypeBuy, orderSide(worker.RemainingQuantity()))
 
 		ctx := context.Background()
 		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
@@ -295,7 +295,7 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 		// Phase 1: Open long position of 2 BTC
 		targetPosition := Number(2.0)
 		worker.SetTargetPosition(targetPosition)
-		assert.Equal(t, types.SideTypeBuy, orderSide(worker.remainingQuantity()))
+		assert.Equal(t, types.SideTypeBuy, orderSide(worker.RemainingQuantity()))
 
 		ctx := context.Background()
 		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
@@ -364,7 +364,7 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 
 		// Phase 2: Close the position (target = 0)
 		worker.SetTargetPosition(fixedpoint.Zero)
-		assert.Equal(t, types.SideTypeSell, orderSide(worker.remainingQuantity()))
+		assert.Equal(t, types.SideTypeSell, orderSide(worker.RemainingQuantity()))
 
 		// Reset time for closing phase - this also clears active order state
 		closeStartTime := startTime.Add(5 * time.Minute)
@@ -418,7 +418,7 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 		// Phase 1: Open short position of -2 BTC (sell 2 BTC)
 		targetPosition := Number(-2.0)
 		worker.SetTargetPosition(targetPosition)
-		assert.Equal(t, types.SideTypeSell, orderSide(worker.remainingQuantity()))
+		assert.Equal(t, types.SideTypeSell, orderSide(worker.RemainingQuantity()))
 
 		ctx := context.Background()
 		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
@@ -487,7 +487,7 @@ func TestTWAPWorker_OpenThenClose(t *testing.T) {
 
 		// Phase 2: Close the position (target = 0)
 		worker.SetTargetPosition(fixedpoint.Zero)
-		assert.Equal(t, types.SideTypeBuy, orderSide(worker.remainingQuantity()))
+		assert.Equal(t, types.SideTypeBuy, orderSide(worker.RemainingQuantity()))
 
 		// Reset time for closing phase
 		closeStartTime := startTime.Add(5 * time.Minute)

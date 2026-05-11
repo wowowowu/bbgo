@@ -85,7 +85,7 @@ func NewArbitrageRound(
 		spotWorker:         spotTwap,
 		futuresWorker:      futuresTwap,
 		futuresService:     futuresService,
-		retryTransferTickC: make(chan time.Time, 1),
+		retryTransferTickC: make(chan time.Time, 100),
 	}
 }
 
@@ -231,19 +231,17 @@ func (r *ArbitrageRound) String() string {
 	)
 }
 
-func (r *ArbitrageRound) CollectedFunding(ctx context.Context, currentTime time.Time) fixedpoint.Value {
+func (r *ArbitrageRound) TotalFundingIncome() fixedpoint.Value {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.syncState.StartTime.IsZero() {
 		return fixedpoint.Zero
 	}
-	return r.collectedFunding(ctx, currentTime)
+	return r.totalFundingIncome()
 }
 
-func (r *ArbitrageRound) collectedFunding(ctx context.Context, currentTime time.Time) fixedpoint.Value {
-	r.syncFundingFeeRecords(ctx, currentTime)
-
+func (r *ArbitrageRound) totalFundingIncome() fixedpoint.Value {
 	var totalFunding fixedpoint.Value
 	for _, fee := range r.syncState.FundingFeeRecords {
 		totalFunding = totalFunding.Add(fee.Amount)
@@ -384,7 +382,7 @@ func (r *ArbitrageRound) retryTransferWorker(ctx context.Context, tickC <-chan t
 					continue
 				}
 				r.logger.Infof("retry transfer (trade: %d): %s %s", tradeID, transfer.Trade.Quantity.String(), r.syncState.Asset)
-				r.HandleSpotTrade(transfer.Trade, currentTime)
+				r.handleSpotTrade(transfer.Trade, currentTime)
 			}
 			r.mu.Unlock()
 		}
@@ -400,16 +398,27 @@ func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Tim
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if trade.Symbol != r.spotWorker.Symbol() || trade.IsFutures {
+	r.handleSpotTrade(trade, currentTime)
+}
+
+func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Time) {
+	if trade.IsFutures || !r.HasOrder(trade.OrderID) {
 		return
 	}
 
 	r.spotWorker.AddTrade(trade)
+	// no matter the transfer succeeds or not, we should update the futures position so that we can stay in delta-neutral
+	r.syncFuturesPosition(trade)
 
-	// try to transfer asset from spot to futures.
+	// try to transfer asset from spot to futures as collateral.
 	// if transfer fails, retry in the next tick until it succeeds
+	timedCtx, cancel := context.WithTimeout(
+		r.spotWorker.ctx,
+		time.Second*20,
+	)
+	defer cancel()
 	if err := r.futuresService.TransferFuturesAccountAsset(
-		r.spotWorker.ctx, r.syncState.Asset, trade.Quantity, types.TransferIn,
+		timedCtx, r.syncState.Asset, trade.Quantity, types.TransferIn,
 	); err != nil {
 		r.logger.WithError(err).Errorf("failed to transfer %s %s from futures to spot",
 			trade.Quantity, r.syncState.Asset)
@@ -430,7 +439,6 @@ func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Tim
 	}
 	// transfer succeeded, remove from retry list if exists
 	delete(r.syncState.RetryTransfers, trade.ID)
-	r.syncFuturesPosition(trade)
 }
 
 func (r *ArbitrageRound) HandleFuturesTrade(trade types.Trade, currentTime time.Time) {

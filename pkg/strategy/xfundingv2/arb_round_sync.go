@@ -29,8 +29,8 @@ func (r *ArbitrageRound) Initialize(ctx context.Context, s *Strategy) error {
 			},
 		},
 	)
-	r.retryTransferTickC = make(chan time.Time)
-	if !r.HasStarted() {
+	r.retryTransferTickC = make(chan time.Time, 100)
+	if r.HasStarted() {
 		// the round has been started before, we need to start the retry worker
 		go r.retryTransferWorker(ctx, r.retryTransferTickC)
 	}

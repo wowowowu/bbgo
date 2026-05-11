@@ -263,7 +263,8 @@ func (s *Strategy) CrossRun(
 	// NOTE: the executors should be created first before anything else to ensure the executors get updated first.
 	// The twap executors rely on the state of the general order executors to determine the filled quantity.
 	s.candidateSymbols = candidateSymbols
-	for _, symbol := range candidateSymbols {
+	candidateSymbolsMap := make(map[string]struct{})
+	setupGeneralExecutorsForSymbol := func(symbol string) error {
 		spotMarket, found := s.spotSession.Market(symbol)
 		if !found {
 			return fmt.Errorf("market %s not found in spot session", symbol)
@@ -315,6 +316,13 @@ func (s *Strategy) CrossRun(
 		futuresExecutor.DisableNotify()
 		futuresExecutor.Bind()
 		s.futuresGeneralOrderExecutors[symbol] = futuresExecutor
+		return nil
+	}
+	for _, symbol := range candidateSymbols {
+		candidateSymbolsMap[symbol] = struct{}{}
+		if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
+			return err
+		}
 	}
 
 	if s.FeeSymbol != "" {
@@ -345,13 +353,16 @@ func (s *Strategy) CrossRun(
 		s.spotGeneralOrderExecutors[s.FeeSymbol] = spotExecutor
 	}
 
+	binanceEx, _ := s.futuresSession.Exchange.(*binance.Exchange)
+	s.preliminaryMarketSelector = NewMarketSelector(*s.MarketSelectionConfig, binanceEx, s.logger)
+
 	// initialize depth books for model selection
 	// we create new stream here to save the bandwidth of the market data stream of the sessions
 	futureStream := s.futuresSession.Exchange.NewStream()
 	futureStream.SetPublicOnly()
 	spotStream := s.spotSession.Exchange.NewStream()
 	spotStream.SetPublicOnly()
-	for _, symbol := range candidateSymbols {
+	setupStreamBooksForSymbol := func(symbol string) {
 		futuresBook := types.NewStreamBook(symbol, s.futuresSession.ExchangeName)
 		futuresBook.BindStream(futureStream)
 		futureStream.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
@@ -362,6 +373,9 @@ func (s *Strategy) CrossRun(
 		spotStream.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
 		s.spotOrderBooks[symbol] = spotBook
 	}
+	for _, symbol := range candidateSymbols {
+		setupStreamBooksForSymbol(symbol)
+	}
 	// subscribe fee symbol order book for trading fee estimation
 	if s.FeeSymbol != "" {
 		spotBook := types.NewStreamBook(s.FeeSymbol, s.spotSession.ExchangeName)
@@ -369,26 +383,43 @@ func (s *Strategy) CrossRun(
 		spotStream.Subscribe(types.BookChannel, s.FeeSymbol, types.SubscribeOptions{})
 		s.spotOrderBooks[s.FeeSymbol] = spotBook
 	}
-	if err := futureStream.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect future stream books: %w", err)
-	}
-	if err := spotStream.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect spot stream books: %w", err)
-	}
-
-	binanceEx, _ := s.futuresSession.Exchange.(*binance.Exchange)
-	s.preliminaryMarketSelector = NewMarketSelector(*s.MarketSelectionConfig, binanceEx, s.logger)
-
 	// runtime init done, load pending and active rounds
+	roundSymbols := make(map[string]struct{})
 	for symbol, pendingRound := range s.pendingRounds {
+		roundSymbols[symbol] = struct{}{}
+		if _, found := candidateSymbolsMap[symbol]; !found {
+			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
+				return fmt.Errorf("failed to setup order executors for pending round symbol %s: %w", symbol, err)
+			}
+		}
 		if err := pendingRound.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("failed to restore pending round (%s): %w", symbol, err)
 		}
 	}
 	for symbol, activeRound := range s.activeRounds {
+		roundSymbols[symbol] = struct{}{}
+		if _, found := candidateSymbolsMap[symbol]; !found {
+			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
+				return fmt.Errorf("failed to setup order executors for active round symbol %s: %w", symbol, err)
+			}
+		}
 		if err := activeRound.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
 		}
+	}
+	// setup stream books for the symbols in the pending and active rounds but not in the candidate list.
+	// This ensures the strategy can keep running and update the states of the rounds even if the symbols are delisted from the market selection.
+	for symbol := range roundSymbols {
+		if _, found := candidateSymbolsMap[symbol]; !found {
+			setupStreamBooksForSymbol(symbol)
+		}
+	}
+
+	if err := futureStream.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect future stream books: %w", err)
+	}
+	if err := spotStream.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect spot stream books: %w", err)
 	}
 
 	// setup callbacks
