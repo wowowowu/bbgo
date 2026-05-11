@@ -567,7 +567,11 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 		return
 	}
 
-	r.retryTransferTickC <- currentTime
+	select {
+	case r.retryTransferTickC <- currentTime:
+	default:
+		r.logger.Warnf("retry transfer tick channel is full, skipping retry tick at %s", currentTime.Format(time.RFC3339))
+	}
 
 	// it's opening or closing, tick the workers
 	r.spotWorker.Tick(currentTime, spotOrderBook)
