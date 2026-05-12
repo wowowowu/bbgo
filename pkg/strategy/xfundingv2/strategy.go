@@ -488,6 +488,8 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 		if round.State() == RoundClosed {
 			s.logger.Infof("removing closed round: %s", round)
 			delete(s.activeRounds, round.SpotSymbol())
+			// TODO: implement a dedicated worker to handle the post-round processing
+			// So that we can prevent blocking the main ticking loop too long when there are multiple rounds get closed.
 			s.handleClosedRound(ctx, round, tickTime)
 		}
 	}
