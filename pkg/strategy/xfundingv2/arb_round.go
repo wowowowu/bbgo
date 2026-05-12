@@ -421,6 +421,7 @@ func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Tim
 		return
 	}
 
+	r.logger.Infof("handling spot trade: %s", trade)
 	r.spotWorker.AddTrade(trade)
 	// no matter the transfer succeeds or not, we should update the futures position so that we can stay in delta-neutral
 	r.syncFuturesPosition(trade)
@@ -460,7 +461,7 @@ func (r *ArbitrageRound) HandleFuturesTrade(trade types.Trade, currentTime time.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if trade.Symbol != r.futuresWorker.Symbol() || !trade.IsFutures {
+	if !trade.IsFutures || !r.hasOrder(trade.OrderID) {
 		return
 	}
 	r.logger.Infof("handling future trade: %s", trade)
