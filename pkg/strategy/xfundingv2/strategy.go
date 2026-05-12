@@ -904,6 +904,35 @@ func (s *Strategy) handleClosedRound(ctx context.Context, round *ArbitrageRound,
 		feeAvgCost := executor.Position().AverageCost
 		round.SetAvgFeeCost(s.FeeSymbol, feeAvgCost)
 	}
+	// clean up open orders if there is any
+	var spotOpenOrders, futuresOpenOrders []types.Order
+	for _, order := range round.spotWorker.Executor().AllOrders() {
+		if !order.GetRemainingQuantity().IsZero() {
+			if order.IsFutures {
+				futuresOpenOrders = append(futuresOpenOrders, order)
+			} else {
+				spotOpenOrders = append(spotOpenOrders, order)
+			}
+		}
+	}
+	if len(spotOpenOrders) > 0 {
+		err := s.spotSession.Exchange.CancelOrders(ctx, spotOpenOrders...)
+		if err != nil {
+			s.logger.WithError(err).Errorf(
+				"[roundExitWorker] failed to cancel open spot orders: %s",
+				round.SpotSymbol(),
+			)
+		}
+	}
+	if len(futuresOpenOrders) > 0 {
+		err := s.futuresSession.Exchange.CancelOrders(ctx, futuresOpenOrders...)
+		if err != nil {
+			s.logger.WithError(err).Errorf(
+				"[roundExitWorker] failed to cancel open futures orders: %s",
+				round.FuturesSymbol(),
+			)
+		}
+	}
 	round.SyncFundingFeeRecords(ctx, tickTime)
 	bbgo.Notify(round.PnL(ctx, tickTime))
 	// TODO: insert closed round records into database
