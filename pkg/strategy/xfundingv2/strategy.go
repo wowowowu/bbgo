@@ -778,6 +778,10 @@ func (s *Strategy) selectMostProfitableMarket(candidates []MarketCandidate) *Mar
 			continue
 		}
 		if s.MarketSelectionConfig.FuturesDirection == types.PositionShort {
+			if candidate.PremiumIndex.LastFundingRate.Sign() <= 0 {
+				// the funding rate is not favorable for short futures, skip
+				continue
+			}
 			// long spot -> find the amount for the quote currency
 			quoteBalance, ok := spotAccount.Balance(spotMarket.QuoteCurrency)
 			if !ok {
@@ -799,6 +803,10 @@ func (s *Strategy) selectMostProfitableMarket(candidates []MarketCandidate) *Mar
 			breakevenIntervals[candidate.Symbol] = breakEvenIntervals
 			targetFuturePositions[candidate.Symbol] = targetSize.Neg()
 		} else if s.MarketSelectionConfig.FuturesDirection == types.PositionLong {
+			if candidate.PremiumIndex.LastFundingRate.Sign() >= 0 {
+				// the funding rate is not favorable for long futures, skip
+				continue
+			}
 			baseBalance, ok := spotAccount.Balance(spotMarket.BaseCurrency)
 			if !ok {
 				continue
