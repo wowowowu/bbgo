@@ -552,6 +552,13 @@ func (s *Strategy) transitOpeningOrReadyRound(ctx context.Context, round *Arbitr
 				currentTime.Format(time.RFC3339), round.State(), fundingRate.LastFundingRate, round)
 			round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration)
 			return
+		} else if currentTime.Sub(round.StartTime()) >= s.MarketSelectionConfig.MaxHoldingHours.Duration() {
+			s.logger.Infof(
+				"[transitOpeningOrReadyRound %s] max holding hours reached, transit state %s -> closing, current funding rate %s: %s",
+				currentTime.Format(time.RFC3339), round.State(), fundingRate.LastFundingRate, round,
+			)
+			round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration)
+			return
 		}
 		// the funding rate is not favorable anymore, check the exit cost to see if it's worth to transit to closing
 		s.costEstimator.SetTargetPosition(round.TargetPosition())
