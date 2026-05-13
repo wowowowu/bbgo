@@ -21,6 +21,11 @@ type TWAPExecutor struct {
 	logger logrus.FieldLogger
 }
 
+type TWAPExecuteOrderOptions struct {
+	DeadlineExceeded bool
+	ReduceOnly       bool
+}
+
 func NewTWAPExecutor(
 	ctx context.Context,
 	exchange types.ExchangeOrderQueryService,
@@ -154,7 +159,7 @@ func (o *TWAPExecutor) AllTrades() []types.Trade {
 }
 
 // place order
-func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType, orderBook types.OrderBook, deadlineExceeded bool) (*types.Order, error) {
+func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType, orderBook types.OrderBook, options TWAPExecuteOrderOptions) (*types.Order, error) {
 	// find the better price and submit new order
 	quantity = o.syncState.Market.TruncateQuantity(quantity)
 	price, err := o.GetPrice(side, orderBook)
@@ -163,7 +168,7 @@ func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType
 		return nil, err
 	}
 	price = o.syncState.Market.TruncatePrice(price)
-	order := o.buildSubmitOrder(quantity, price, side, deadlineExceeded)
+	order := o.buildSubmitOrder(quantity, price, side, options)
 	if o.syncState.Market.IsDustQuantity(order.Quantity, order.Price) {
 		return nil, fmt.Errorf("order is of dust quantity: %s", quantity)
 	}
@@ -179,14 +184,15 @@ func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType
 	return &createdOrders[0], nil
 }
 
-func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side types.SideType, deadlineExceeded bool) types.SubmitOrder {
-	if deadlineExceeded {
+func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side types.SideType, options TWAPExecuteOrderOptions) types.SubmitOrder {
+	if options.DeadlineExceeded {
 		return types.SubmitOrder{
-			Symbol:   o.syncState.Market.Symbol,
-			Market:   o.syncState.Market,
-			Side:     side,
-			Type:     types.OrderTypeMarket,
-			Quantity: quantity,
+			Symbol:     o.syncState.Market.Symbol,
+			Market:     o.syncState.Market,
+			Side:       side,
+			Type:       types.OrderTypeMarket,
+			Quantity:   quantity,
+			ReduceOnly: true,
 		}
 	}
 	orderType := types.OrderTypeLimitMaker
@@ -197,7 +203,7 @@ func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side t
 		timeInForce = types.TimeInForceIOC
 	}
 
-	return types.SubmitOrder{
+	orderForm := types.SubmitOrder{
 		Symbol:      o.syncState.Market.Symbol,
 		Market:      o.syncState.Market,
 		Side:        side,
@@ -205,7 +211,9 @@ func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side t
 		Quantity:    quantity,
 		Price:       price,
 		TimeInForce: timeInForce,
+		ReduceOnly:  options.ReduceOnly,
 	}
+	return orderForm
 }
 
 func (o *TWAPExecutor) GetPrice(side types.SideType, orderBook types.OrderBook) (price fixedpoint.Value, err error) {

@@ -336,7 +336,9 @@ func TestTWAPOrderExecutor_PlaceOrder(t *testing.T) {
 			Return(&expectedOrder, nil).
 			Times(1)
 
-		createdOrder, err := executor.PlaceOrder(Number(1.0), types.SideTypeBuy, orderBook, false)
+		createdOrder, err := executor.PlaceOrder(Number(1.0), types.SideTypeBuy, orderBook, TWAPExecuteOrderOptions{
+			DeadlineExceeded: false,
+		})
 
 		assert.NoError(t, err)
 		assert.NotNil(t, createdOrder)
@@ -358,7 +360,9 @@ func TestTWAPOrderExecutor_PlaceOrder(t *testing.T) {
 		orderBook := newOrderBook(99.0, 10.0, 100.0, 10.0)
 
 		// Very small quantity that would be dust
-		_, err := executor.PlaceOrder(Number(0.00000001), types.SideTypeBuy, orderBook, false)
+		_, err := executor.PlaceOrder(Number(0.00000001), types.SideTypeBuy, orderBook, TWAPExecuteOrderOptions{
+			DeadlineExceeded: false,
+		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "dust quantity")
 	})
@@ -383,7 +387,9 @@ func TestTWAPOrderExecutor_PlaceOrder(t *testing.T) {
 			Return(nil, expectedErr).
 			Times(1)
 
-		createdOrder, err := executor.PlaceOrder(Number(1.0), types.SideTypeBuy, orderBook, false)
+		createdOrder, err := executor.PlaceOrder(Number(1.0), types.SideTypeBuy, orderBook, TWAPExecuteOrderOptions{
+			DeadlineExceeded: false,
+		})
 
 		assert.Error(t, err)
 		assert.Nil(t, createdOrder)
@@ -664,7 +670,9 @@ func TestTWAPOrderExecutor_PlaceOrder_EmptyOrderBook(t *testing.T) {
 
 	emptyBook := &types.SliceOrderBook{}
 
-	_, err := executor.PlaceOrder(Number(1.0), types.SideTypeBuy, emptyBook, false)
+	_, err := executor.PlaceOrder(Number(1.0), types.SideTypeBuy, emptyBook, TWAPExecuteOrderOptions{
+		DeadlineExceeded: false,
+	})
 	assert.Error(t, err)
 }
 
