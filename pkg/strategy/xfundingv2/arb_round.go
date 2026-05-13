@@ -28,6 +28,7 @@ const (
 
 type FuturesService interface {
 	batch.BinanceFuturesIncomeHistoryService
+	types.ExchangeRiskService
 
 	TransferFuturesAccountAsset(ctx context.Context, asset string, amount fixedpoint.Value, io types.TransferDirection) error
 	QueryPremiumIndex(ctx context.Context, symbol string) (*types.PremiumIndex, error)
@@ -523,12 +524,8 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 
 	defer func() {
 		// get mid price
-		spotBid, _ := spotOrderBook.BestBid()
-		spotAsk, _ := spotOrderBook.BestAsk()
-		futuresBid, _ := futuresOrderBook.BestBid()
-		futuresAsk, _ := futuresOrderBook.BestAsk()
-		spotMidPrice := spotBid.Price.Add(spotAsk.Price).Div(fixedpoint.Two)
-		futuresMidPrice := futuresBid.Price.Add(futuresAsk.Price).Div(fixedpoint.Two)
+		spotMidPrice := getMidPrice(spotOrderBook)
+		futuresMidPrice := getMidPrice(futuresOrderBook)
 
 		// the state is PositionOpening
 		// check if the spot and futures positions are fully filled -> PositionReady
