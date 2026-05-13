@@ -124,6 +124,16 @@ func (o *TWAPExecutor) GetOrder(orderID uint64) (types.Order, bool) {
 	return o.executor.OrderStore().Get(orderID)
 }
 
+func (o *TWAPExecutor) OpenOrders() []types.Order {
+	var openOrders []types.Order
+	for _, order := range o.executor.ActiveMakerOrders().Orders() {
+		if _, found := o.syncState.Orders[order.OrderID]; found {
+			openOrders = append(openOrders, order)
+		}
+	}
+	return openOrders
+}
+
 func (o *TWAPExecutor) AllOrders() []types.Order {
 	var orders []types.Order
 

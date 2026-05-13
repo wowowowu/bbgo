@@ -923,14 +923,11 @@ func (s *Strategy) handleClosedRound(ctx context.Context, round *ArbitrageRound,
 	}
 	// clean up open orders if there is any
 	var spotOpenOrders, futuresOpenOrders []types.Order
-	for _, order := range round.spotWorker.Executor().AllOrders() {
-		if !order.GetRemainingQuantity().IsZero() {
-			if order.IsFutures {
-				futuresOpenOrders = append(futuresOpenOrders, order)
-			} else {
-				spotOpenOrders = append(spotOpenOrders, order)
-			}
-		}
+	for _, order := range round.SpotWorker().Executor().OpenOrders() {
+		spotOpenOrders = append(spotOpenOrders, order)
+	}
+	for _, order := range round.FuturesWorker().Executor().OpenOrders() {
+		futuresOpenOrders = append(futuresOpenOrders, order)
 	}
 	if len(spotOpenOrders) > 0 {
 		err := s.spotSession.Exchange.CancelOrders(ctx, spotOpenOrders...)

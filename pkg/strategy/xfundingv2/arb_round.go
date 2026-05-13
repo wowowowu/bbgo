@@ -480,6 +480,14 @@ func (r *ArbitrageRound) FuturesSymbol() string {
 	return r.futuresWorker.Symbol()
 }
 
+func (r *ArbitrageRound) SpotWorker() *TWAPWorker {
+	return r.spotWorker
+}
+
+func (r *ArbitrageRound) FuturesWorker() *TWAPWorker {
+	return r.futuresWorker
+}
+
 func (r *ArbitrageRound) FuturesMarket() types.Market {
 	return r.futuresWorker.Market()
 }
