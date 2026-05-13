@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 )
@@ -82,6 +83,7 @@ func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Ti
 		s.activeRounds[round.SpotSymbol()] = round
 		delete(s.pendingRounds, round.SpotSymbol())
 		s.logger.Infof("round started: %s", round)
+		bbgo.Notify(round)
 	}
 }
 
