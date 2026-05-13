@@ -11,6 +11,7 @@ import (
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/exchange/batch"
 	"github.com/c9s/bbgo/pkg/exchange/binance/binanceapi"
+	"github.com/c9s/bbgo/pkg/exchange/retry"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 )
@@ -28,10 +29,10 @@ const (
 
 type FuturesService interface {
 	batch.BinanceFuturesIncomeHistoryService
-	types.ExchangeRiskService
 
 	TransferFuturesAccountAsset(ctx context.Context, asset string, amount fixedpoint.Value, io types.TransferDirection) error
 	QueryPremiumIndex(ctx context.Context, symbol string) (*types.PremiumIndex, error)
+	QueryPositionRisk(ctx context.Context, symbol ...string) ([]types.PositionRisk, error)
 }
 
 type transferRetry struct {
@@ -512,6 +513,55 @@ func (r *ArbitrageRound) SetClosing(currentTime time.Time, duration time.Duratio
 	r.syncState.State = RoundClosing
 	r.syncState.ClosingTime = currentTime
 	r.syncState.ClosingDuration = duration
+}
+
+func (r *ArbitrageRound) Cleanup(ctx context.Context, orderBook types.OrderBook) error {
+	if r.syncState.State != RoundClosed {
+		return fmt.Errorf("round is not closed yet: %s", r)
+	}
+	w := r.futuresWorker
+	remaining := w.RemainingQuantity()
+	if remaining.IsZero() {
+		return nil
+	}
+
+	midPrice := getMidPrice(orderBook)
+	market := w.Market()
+	if market.IsDustQuantity(remaining.Abs(), midPrice) {
+		// if the remaining is dust, we adjust it to a much larger amount
+		// With `ReduceOnly` flag, theoretically it will reduce the position to zero without creating new position.
+		remaining = market.MinNotional.Mul(fixedpoint.Two).Div(midPrice).Round(0, fixedpoint.Up)
+	}
+
+	orderOptions := TWAPExecuteOrderOptions{
+		DeadlineExceeded: true,
+		ReduceOnly:       true,
+	}
+	createdOrder, err := w.Executor().PlaceOrder(
+		remaining.Abs(),
+		orderSide(remaining),
+		orderBook,
+		orderOptions,
+	)
+	if err != nil || createdOrder == nil {
+		return fmt.Errorf("[CloseFuturesPosition] failed to place order to close remaining quantity: %w", err)
+	}
+	// collect trades for this closing order
+	exchange := w.syncState.TWAPExecutor.exchange
+	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if _, err := retry.QueryOrderTradesUntilSuccessfulLite(timedCtx, exchange, createdOrder.AsQuery()); err != nil {
+		return fmt.Errorf("[CloseFuturesPosition] failed to wait for closing order trades: %w", err)
+	}
+	risks, err := r.futuresService.QueryPositionRisk(timedCtx, r.FuturesSymbol())
+	if err != nil || len(risks) == 0 {
+		return fmt.Errorf("[CloseFuturesPosition] failed to query position risk after closing order filled: %w", err)
+	}
+	risk := risks[0]
+	if !risk.PositionAmount.IsZero() {
+		return fmt.Errorf("[CloseFuturesPosition] position is not fully closed after closing order filled, remaining position: %s %s", risk.PositionAmount, risk.Symbol)
+	}
+	return nil
 }
 
 func (r *ArbitrageRound) AnnualizedRate() fixedpoint.Value {

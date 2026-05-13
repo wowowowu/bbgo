@@ -348,7 +348,12 @@ func (w *TWAPWorker) Tick(currentTime time.Time, orderBook types.OrderBook) erro
 	// we don't have an active order, place a new one
 	if w.syncState.ActiveOrder == nil {
 		sliceQty := w.calculateSliceQuantity(currentTime, remaining, false)
-		createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(sliceQty, orderSide(remaining), orderBook, orderOptions)
+		createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(
+			sliceQty,
+			orderSide(remaining),
+			orderBook,
+			orderOptions,
+		)
 		if err != nil || createdOrder == nil {
 			return fmt.Errorf("failed to place order: %w", err)
 		}
@@ -401,7 +406,12 @@ func (w *TWAPWorker) Tick(currentTime time.Time, orderBook types.OrderBook) erro
 	// currentTime is after current interval end, time to place the next slice order
 	// calculate slice quantity
 	sliceQty := w.calculateSliceQuantity(currentTime, remaining, deadlineExceeded)
-	createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(sliceQty, orderSide(remaining), orderBook, deadlineExceeded)
+	createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(
+		sliceQty,
+		orderSide(remaining),
+		orderBook,
+		orderOptions,
+	)
 	if err != nil || createdOrder == nil {
 		return fmt.Errorf("failed to place order for next slice: %w", err)
 	}
