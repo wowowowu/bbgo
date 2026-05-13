@@ -656,41 +656,6 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	defer func() {
-		// get mid price
-		spotMidPrice := getMidPrice(spotOrderBook)
-		futuresMidPrice := getMidPrice(futuresOrderBook)
-
-		// the state is PositionOpening
-		// check if the spot and futures positions are fully filled -> PositionReady
-		if r.syncState.State == RoundOpening {
-			spotRemaining := r.spotWorker.RemainingQuantity()
-			futuresRemaining := r.futuresWorker.RemainingQuantity()
-			spotIsDust := r.spotWorker.Market().IsDustQuantity(spotRemaining.Abs(), spotMidPrice)
-			futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresRemaining.Abs(), futuresMidPrice)
-
-			if spotIsDust && futuresIsDust {
-				r.syncState.State = RoundReady
-				return
-			}
-		}
-
-		// the state is PositionClosing
-		// check if the spot and futures positions are fully closed -> PositionClosed
-		if r.syncState.State == RoundClosing {
-			spotFilled := r.spotWorker.FilledPosition()
-			futuresFilled := r.futuresWorker.FilledPosition()
-			spotIsDust := r.spotWorker.Market().IsDustQuantity(spotFilled.Abs(), spotMidPrice)
-			futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresFilled.Abs(), futuresMidPrice)
-
-			if spotIsDust && futuresIsDust {
-				r.syncState.State = RoundClosed
-				r.logger.Infof("positions closed, arbitrage round completed: %s", r.spotWorker.Symbol())
-			}
-			return
-		}
-	}()
-
 	if r.syncState.State == RoundPending {
 		// not started yet, do nothing
 		return
@@ -716,6 +681,39 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 	// it's opening or closing, tick the workers
 	r.spotWorker.Tick(currentTime, spotOrderBook)
 	r.futuresWorker.Tick(currentTime, futuresOrderBook)
+
+	// get mid price
+	spotMidPrice := getMidPrice(spotOrderBook)
+	futuresMidPrice := getMidPrice(futuresOrderBook)
+
+	// the state is PositionOpening
+	// check if the spot and futures positions are fully filled -> PositionReady
+	if r.syncState.State == RoundOpening {
+		spotRemaining := r.spotWorker.RemainingQuantity()
+		futuresRemaining := r.futuresWorker.RemainingQuantity()
+		spotIsDust := r.spotWorker.Market().IsDustQuantity(spotRemaining.Abs(), spotMidPrice)
+		futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresRemaining.Abs(), futuresMidPrice)
+
+		if spotIsDust && futuresIsDust {
+			r.syncState.State = RoundReady
+			return
+		}
+	}
+
+	// the state is PositionClosing
+	// check if the spot and futures positions are fully closed -> PositionClosed
+	if r.syncState.State == RoundClosing {
+		spotFilled := r.spotWorker.FilledPosition()
+		futuresFilled := r.futuresWorker.FilledPosition()
+		spotIsDust := r.spotWorker.Market().IsDustQuantity(spotFilled.Abs(), spotMidPrice)
+		futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresFilled.Abs(), futuresMidPrice)
+
+		if spotIsDust && futuresIsDust {
+			r.syncState.State = RoundClosed
+			r.logger.Infof("positions closed, arbitrage round completed: %s", r.spotWorker.Symbol())
+		}
+		return
+	}
 }
 
 func (r *ArbitrageRound) syncFuturesPosition(trade types.Trade) {
