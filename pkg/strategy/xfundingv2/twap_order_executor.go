@@ -129,14 +129,9 @@ func (o *TWAPExecutor) GetOrder(orderID uint64) (types.Order, bool) {
 	return o.executor.OrderStore().Get(orderID)
 }
 
-func (o *TWAPExecutor) OpenOrders() []types.Order {
-	var openOrders []types.Order
-	for _, order := range o.executor.ActiveMakerOrders().Orders() {
-		if _, found := o.syncState.Orders[order.OrderID]; found {
-			openOrders = append(openOrders, order)
-		}
-	}
-	return openOrders
+func (o *TWAPExecutor) CancelOpenOrders(ctx context.Context) error {
+	activeOrderBook := o.executor.ActiveMakerOrders()
+	return o.executor.GracefulCancelActiveOrderBook(ctx, activeOrderBook)
 }
 
 func (o *TWAPExecutor) AllOrders() []types.Order {
@@ -169,7 +164,7 @@ func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType
 	}
 	price = o.syncState.Market.TruncatePrice(price)
 	order := o.buildSubmitOrder(quantity, price, side, options)
-	if o.syncState.Market.IsDustQuantity(order.Quantity, order.Price) {
+	if order.Type != types.OrderTypeMarket && o.syncState.Market.IsDustQuantity(order.Quantity, order.Price) {
 		return nil, fmt.Errorf("order is of dust quantity: %s", quantity)
 	}
 
