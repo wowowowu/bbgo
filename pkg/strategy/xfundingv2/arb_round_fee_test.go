@@ -221,8 +221,8 @@ func TestStrategy_AquireFeeAssetAndTransfer(t *testing.T) {
 		// Spot needs 2.0 BNB, has 0.3 BNB; Futures needs 0.5 BNB, has 0.6 BNB
 		// spotDeficit = 2.0 - 0.3 = 1.7, futuresDeficit = 0.5 - 0.6 = -0.1
 		// total = 1.7 + (-0.1) = 1.6 >= 0 → buy 1.6, transfer max(0, -0.1) = 0 to futures
-		// futuresDeficit <= 0 and spotDeficit > 0 but we're in the "total >= 0" branch
-		// so transferAmount = max(0, futuresDeficit) = 0 → no transfer
+		// futuresDeficit <= 0 and spotDeficit > 0
+		// so transferAmount = futuresDeficit.Neg() = 0.1 → transfer out
 		s, mockExchange, mockService := setup(Number(0.3), Number(0.6))
 		rounds := makeRounds(Number(2.0), Number(0.5))
 
@@ -240,8 +240,10 @@ func TestStrategy_AquireFeeAssetAndTransfer(t *testing.T) {
 		err := s.acquireFeeAssetAndTransfer(ctx, rounds)
 
 		assert.NoError(t, err)
-		// No transfer needed since bought assets land in spot and futuresDeficit <= 0
-		assert.False(t, mockService.transferCalled)
+		// transfer needed:
+		assert.True(t, mockService.transferCalled)
+		assert.Equal(t, Number(0.1), mockService.transferredAmount)
+		assert.Equal(t, types.TransferOut, mockService.transferredDirection)
 	})
 }
 

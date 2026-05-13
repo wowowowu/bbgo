@@ -124,6 +124,16 @@ func (o *TWAPExecutor) GetOrder(orderID uint64) (types.Order, bool) {
 	return o.executor.OrderStore().Get(orderID)
 }
 
+func (o *TWAPExecutor) OpenOrders() []types.Order {
+	var openOrders []types.Order
+	for _, order := range o.executor.ActiveMakerOrders().Orders() {
+		if _, found := o.syncState.Orders[order.OrderID]; found {
+			openOrders = append(openOrders, order)
+		}
+	}
+	return openOrders
+}
+
 func (o *TWAPExecutor) AllOrders() []types.Order {
 	var orders []types.Order
 
@@ -224,8 +234,7 @@ func (o *TWAPExecutor) getTakerPrice(side types.SideType, orderBook types.OrderB
 		}
 		price := ask.Price
 		if o.syncState.Config.MaxSlippage.Sign() > 0 {
-			maxPrice := price.Mul(fixedpoint.One.Add(o.syncState.Config.MaxSlippage))
-			price = fixedpoint.Min(price, maxPrice)
+			price = price.Mul(fixedpoint.One.Add(o.syncState.Config.MaxSlippage))
 		}
 		return price, nil
 
@@ -236,8 +245,7 @@ func (o *TWAPExecutor) getTakerPrice(side types.SideType, orderBook types.OrderB
 		}
 		price := bid.Price
 		if o.syncState.Config.MaxSlippage.Sign() > 0 {
-			minPrice := price.Mul(fixedpoint.One.Sub(o.syncState.Config.MaxSlippage))
-			price = fixedpoint.Max(price, minPrice)
+			price = price.Mul(fixedpoint.One.Sub(o.syncState.Config.MaxSlippage))
 		}
 		return price, nil
 

@@ -163,19 +163,17 @@ func TestTWAPOrderExecutor_GetTakerPrice(t *testing.T) {
 	t.Run("buy with max slippage", func(t *testing.T) {
 		// ask=100.0, maxSlippage=0.01
 		// maxPrice = 100.0 * (1 + 0.01) = 101.0
-		// price = min(100.0, 101.0) = 100.0
 		price, err := executor.GetPrice(types.SideTypeBuy, orderBook)
 		assert.NoError(t, err)
-		assert.Equal(t, Number(100.0), price)
+		assert.Equal(t, Number(101.0), price)
 	})
 
 	t.Run("sell with max slippage", func(t *testing.T) {
 		// bid=99.0, maxSlippage=0.01
 		// minPrice = 99.0 * (1 - 0.01) = 98.01
-		// price = max(99.0, 98.01) = 99.0
 		price, err := executor.GetPrice(types.SideTypeSell, orderBook)
 		assert.NoError(t, err)
-		assert.Equal(t, Number(99.0), price)
+		assert.Equal(t, Number(98.01), price)
 	})
 
 	t.Run("empty order book returns error for buy", func(t *testing.T) {

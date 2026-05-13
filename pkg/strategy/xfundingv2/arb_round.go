@@ -196,10 +196,12 @@ func (r *ArbitrageRound) NumHoldingIntervals(currentTime time.Time) int {
 	if r.syncState.StartTime.IsZero() {
 		return 0
 	}
-	// the funding rate has not flipped, check if the minimum holding time has passed
 	intervalDuration := time.Duration(r.syncState.FundingIntervalHours) * time.Hour
-	lastIntervalEnd := currentTime.Truncate(intervalDuration)
-	return int(lastIntervalEnd.Sub(r.syncState.FundingIntervalStart) / intervalDuration)
+	elapsed := currentTime.Sub(r.syncState.FundingIntervalStart)
+	if elapsed < 0 {
+		return 0
+	}
+	return int(elapsed / intervalDuration)
 }
 
 func (r *ArbitrageRound) MinHoldingIntervals() int {
@@ -293,6 +295,10 @@ func (r *ArbitrageRound) HasOrder(orderID uint64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	return r.hasOrder(orderID)
+}
+
+func (r *ArbitrageRound) hasOrder(orderID uint64) bool {
 	_, spotExists := r.spotWorker.Executor().GetOrder(orderID)
 	_, futuresExists := r.futuresWorker.Executor().GetOrder(orderID)
 
@@ -411,10 +417,11 @@ func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Tim
 }
 
 func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Time) {
-	if trade.IsFutures || !r.HasOrder(trade.OrderID) {
+	if trade.IsFutures || !r.hasOrder(trade.OrderID) {
 		return
 	}
 
+	r.logger.Infof("handling spot trade: %s", trade)
 	r.spotWorker.AddTrade(trade)
 	// no matter the transfer succeeds or not, we should update the futures position so that we can stay in delta-neutral
 	r.syncFuturesPosition(trade)
@@ -454,7 +461,7 @@ func (r *ArbitrageRound) HandleFuturesTrade(trade types.Trade, currentTime time.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if trade.Symbol != r.futuresWorker.Symbol() || !trade.IsFutures {
+	if !trade.IsFutures || !r.hasOrder(trade.OrderID) {
 		return
 	}
 	r.logger.Infof("handling future trade: %s", trade)
@@ -471,6 +478,14 @@ func (r *ArbitrageRound) SpotSymbol() string {
 
 func (r *ArbitrageRound) FuturesSymbol() string {
 	return r.futuresWorker.Symbol()
+}
+
+func (r *ArbitrageRound) SpotWorker() *TWAPWorker {
+	return r.spotWorker
+}
+
+func (r *ArbitrageRound) FuturesWorker() *TWAPWorker {
+	return r.futuresWorker
 }
 
 func (r *ArbitrageRound) FuturesMarket() types.Market {
@@ -561,7 +576,11 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 		return
 	}
 
-	r.retryTransferTickC <- currentTime
+	select {
+	case r.retryTransferTickC <- currentTime:
+	default:
+		r.logger.Warnf("retry transfer tick channel is full, skipping retry tick at %s", currentTime.Format(time.RFC3339))
+	}
 
 	// it's opening or closing, tick the workers
 	r.spotWorker.Tick(currentTime, spotOrderBook)

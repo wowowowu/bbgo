@@ -215,7 +215,7 @@ func (s *Strategy) CrossRun(
 		return fmt.Errorf("spot session %s not found", s.SpotSession)
 	}
 	if futuresEx, ok := s.futuresSession.Exchange.(types.FuturesExchange); !ok {
-		return fmt.Errorf("sessioin %s does not support futures", s.futuresSession.Name)
+		return fmt.Errorf("session %s does not support futures", s.futuresSession.Name)
 	} else if !futuresEx.GetFuturesSettings().IsFutures {
 		return fmt.Errorf("session %s is not configured for futures trading", s.futuresSession.Name)
 	}
@@ -487,6 +487,8 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 		if round.State() == RoundClosed {
 			s.logger.Infof("removing closed round: %s", round)
 			delete(s.activeRounds, round.SpotSymbol())
+			// TODO: implement a dedicated worker to handle the post-round processing
+			// So that we can prevent blocking the main ticking loop too long when there are multiple rounds get closed.
 			s.handleClosedRound(ctx, round, tickTime)
 		}
 	}
@@ -549,6 +551,13 @@ func (s *Strategy) transitOpeningOrReadyRound(ctx context.Context, round *Arbitr
 			s.logger.Infof(
 				"[transitOpeningOrReadyRound %s] min holding time passed, transit state %s -> closing, current funding rate %s: %s",
 				currentTime.Format(time.RFC3339), round.State(), fundingRate.LastFundingRate, round)
+			round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration)
+			return
+		} else if currentTime.Sub(round.StartTime()) >= s.MarketSelectionConfig.MaxHoldingHours.Duration() {
+			s.logger.Infof(
+				"[transitOpeningOrReadyRound %s] max holding hours reached, transit state %s -> closing, current funding rate %s: %s",
+				currentTime.Format(time.RFC3339), round.State(), fundingRate.LastFundingRate, round,
+			)
 			round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration)
 			return
 		}
@@ -621,7 +630,7 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 			return
 		}
 
-		selectedCandidate := s.selectMostPorfitableMarket(candidates)
+		selectedCandidate := s.selectMostProfitableMarket(candidates)
 		if selectedCandidate == nil {
 			// no profitable candidate found, nothing to do
 			return
@@ -757,7 +766,7 @@ func (s *Strategy) filterMarketCollateralRate(ctx context.Context, symbols []str
 // selectMostProfitableMarket selects the most profitable market among the candidates based on the estimated break-even holding intervals
 // it will also return the target position for the futures trade
 // the most profitable market is the one with the shortest break-even holding intervals
-func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *MarketCandidate {
+func (s *Strategy) selectMostProfitableMarket(candidates []MarketCandidate) *MarketCandidate {
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -770,6 +779,10 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *Mar
 			continue
 		}
 		if s.MarketSelectionConfig.FuturesDirection == types.PositionShort {
+			if candidate.PremiumIndex.LastFundingRate.Sign() <= 0 {
+				// the funding rate is not favorable for short futures, skip
+				continue
+			}
 			// long spot -> find the amount for the quote currency
 			quoteBalance, ok := spotAccount.Balance(spotMarket.QuoteCurrency)
 			if !ok {
@@ -778,7 +791,7 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *Mar
 			tradeQuoteBalance := quoteBalance.Available.Mul(s.MarketSelectionConfig.TradeBalanceRatio)
 			// long spot -> trade on the sell side of the order book
 			sellBook := s.spotOrderBooks[candidate.Symbol].SideBook(types.SideTypeSell)
-			spotPrice := sellBook.AverageDepthPriceByQuote(quoteBalance.Available, 0)
+			spotPrice := sellBook.AverageDepthPriceByQuote(tradeQuoteBalance, 0)
 			targetSize := tradeQuoteBalance.Div(spotPrice)
 			// short futures -> trade on the buy side of the order book
 			buyBook := s.futuresOrderBooks[candidate.Symbol].SideBook(types.SideTypeBuy)
@@ -791,6 +804,10 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *Mar
 			breakevenIntervals[candidate.Symbol] = breakEvenIntervals
 			targetFuturePositions[candidate.Symbol] = targetSize.Neg()
 		} else if s.MarketSelectionConfig.FuturesDirection == types.PositionLong {
+			if candidate.PremiumIndex.LastFundingRate.Sign() >= 0 {
+				// the funding rate is not favorable for long futures, skip
+				continue
+			}
 			baseBalance, ok := spotAccount.Balance(spotMarket.BaseCurrency)
 			if !ok {
 				continue
@@ -848,13 +865,13 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 		return fixedpoint.Zero, errors.New("order book not found for candidate symbol")
 	}
 	spotOrderBookSnapshot := spotOrderBook.Copy()
-	futuresOrderBookShapshot := futuresOrderBook.Copy()
+	futuresOrderBookSnapshot := futuresOrderBook.Copy()
 
-	estimateEntryCost, err := s.costEstimator.EstimateEntryCost(true, spotOrderBookSnapshot, futuresOrderBookShapshot)
+	estimateEntryCost, err := s.costEstimator.EstimateEntryCost(true, spotOrderBookSnapshot, futuresOrderBookSnapshot)
 	if err != nil {
 		return fixedpoint.Zero, err
 	}
-	estimateExitCost, err := s.costEstimator.EstimateExitCost(true, spotOrderBookSnapshot, futuresOrderBookShapshot)
+	estimateExitCost, err := s.costEstimator.EstimateExitCost(true, spotOrderBookSnapshot, futuresOrderBookSnapshot)
 	if err != nil {
 		return fixedpoint.Zero, err
 	}
@@ -866,7 +883,7 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 	amount := targetPosition.Abs().Mul(bestPrice)
 	estimateFundingFeePerInterval := amount.Mul(candidate.PremiumIndex.LastFundingRate.Abs())
 	if estimateFundingFeePerInterval.IsZero() {
-		return fixedpoint.Zero, nil
+		return fixedpoint.Zero, fmt.Errorf("estimated funding fee per interval is zero for candidate %s", candidate.Symbol)
 	}
 	breakEvenIntervals := totalCost.Div(estimateFundingFeePerInterval).Round(0, fixedpoint.Up)
 	return breakEvenIntervals, nil
@@ -902,6 +919,32 @@ func (s *Strategy) handleClosedRound(ctx context.Context, round *ArbitrageRound,
 	if executor, ok := s.spotGeneralOrderExecutors[s.FeeSymbol]; ok {
 		feeAvgCost := executor.Position().AverageCost
 		round.SetAvgFeeCost(s.FeeSymbol, feeAvgCost)
+	}
+	// clean up open orders if there is any
+	var spotOpenOrders, futuresOpenOrders []types.Order
+	for _, order := range round.SpotWorker().Executor().OpenOrders() {
+		spotOpenOrders = append(spotOpenOrders, order)
+	}
+	for _, order := range round.FuturesWorker().Executor().OpenOrders() {
+		futuresOpenOrders = append(futuresOpenOrders, order)
+	}
+	if len(spotOpenOrders) > 0 {
+		err := s.spotSession.Exchange.CancelOrders(ctx, spotOpenOrders...)
+		if err != nil {
+			s.logger.WithError(err).Errorf(
+				"[roundExitWorker] failed to cancel open spot orders: %s",
+				round.SpotSymbol(),
+			)
+		}
+	}
+	if len(futuresOpenOrders) > 0 {
+		err := s.futuresSession.Exchange.CancelOrders(ctx, futuresOpenOrders...)
+		if err != nil {
+			s.logger.WithError(err).Errorf(
+				"[roundExitWorker] failed to cancel open futures orders: %s",
+				round.FuturesSymbol(),
+			)
+		}
 	}
 	round.SyncFundingFeeRecords(ctx, tickTime)
 	bbgo.Notify(round.PnL(ctx, tickTime))

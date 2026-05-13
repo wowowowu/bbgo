@@ -80,11 +80,11 @@ func TestArbitrageRound_MarshalUnmarshalJSON(t *testing.T) {
 		round := &ArbitrageRound{
 			syncState: ArbitrageRoundSyncState{
 				TriggeredFundingRate: fixedpoint.NewFromFloat(0.0005),
-				SpotExchangeName:    types.ExchangeBinance,
-				FuturesExchangeName: types.ExchangeBinance,
-				State:               RoundPending,
-				Asset:               "ETH",
-				FundingFeeRecords:   make(map[int64]FundingFee),
+				SpotExchangeName:     types.ExchangeBinance,
+				FuturesExchangeName:  types.ExchangeBinance,
+				State:                RoundPending,
+				Asset:                "ETH",
+				FundingFeeRecords:    make(map[int64]FundingFee),
 			},
 		}
 
