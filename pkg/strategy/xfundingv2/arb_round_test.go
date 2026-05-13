@@ -38,6 +38,10 @@ func (m *mockFuturesService) QueryPremiumIndex(ctx context.Context, symbol strin
 	return nil, nil
 }
 
+func (m *mockFuturesService) QueryPositionRisk(ctx context.Context, symbol ...string) ([]types.PositionRisk, error) {
+	return nil, nil
+}
+
 func newTestArbitrageRound(t *testing.T, ctrl *gomock.Controller, fundingIntervalHours, minHoldingIntervals int, nextFundingTime time.Time) (*ArbitrageRound, *mockFuturesService) {
 	config := TWAPWorkerConfig{
 		Duration:  10 * time.Minute,

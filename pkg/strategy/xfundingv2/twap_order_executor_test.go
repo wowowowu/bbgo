@@ -259,7 +259,7 @@ func TestTWAPOrderExecutor_BuildSubmitOrder(t *testing.T) {
 		}
 		executor, _, _ := testExecutorSetup(t, ctrl, config)
 
-		order := executor.buildSubmitOrder(Number(1.0), Number(100.0), types.SideTypeBuy, true)
+		order := executor.buildSubmitOrder(Number(1.0), Number(100.0), types.SideTypeBuy, TWAPExecuteOrderOptions{DeadlineExceeded: true})
 
 		assert.Equal(t, market.Symbol, order.Symbol)
 		assert.Equal(t, types.SideTypeBuy, order.Side)
@@ -276,7 +276,7 @@ func TestTWAPOrderExecutor_BuildSubmitOrder(t *testing.T) {
 		}
 		executor, _, _ := testExecutorSetup(t, ctrl2, config)
 
-		order := executor.buildSubmitOrder(Number(1.5), Number(50000.0), types.SideTypeSell, false)
+		order := executor.buildSubmitOrder(Number(1.5), Number(50000.0), types.SideTypeSell, TWAPExecuteOrderOptions{})
 
 		assert.Equal(t, market.Symbol, order.Symbol)
 		assert.Equal(t, types.SideTypeSell, order.Side)
@@ -295,7 +295,7 @@ func TestTWAPOrderExecutor_BuildSubmitOrder(t *testing.T) {
 		}
 		executor, _, _ := testExecutorSetup(t, ctrl2, config)
 
-		order := executor.buildSubmitOrder(Number(2.0), Number(48000.0), types.SideTypeBuy, false)
+		order := executor.buildSubmitOrder(Number(2.0), Number(48000.0), types.SideTypeBuy, TWAPExecuteOrderOptions{})
 
 		assert.Equal(t, market.Symbol, order.Symbol)
 		assert.Equal(t, types.SideTypeBuy, order.Side)
