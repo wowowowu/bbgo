@@ -259,15 +259,15 @@ func (s *Strategy) CrossRun(
 	}
 	// if there is any open position, it should have a corresponding active round which is loaded via LoadState.
 	// Otherwise, it is a mismatch and should raise an error to stop the strategy from running.
-	var misMatchSymbols []string
+	var mismatchSymbols []string
 	for _, risk := range risks {
 		_, found := s.activeRounds[risk.Symbol]
 		if !risk.PositionAmount.IsZero() && !found {
-			misMatchSymbols = append(misMatchSymbols, risk.Symbol)
+			mismatchSymbols = append(mismatchSymbols, risk.Symbol)
 		}
 	}
-	if len(misMatchSymbols) > 0 {
-		return fmt.Errorf("found open positions without active rounds: %v on %s", misMatchSymbols, s.futuresSession.Exchange.Name())
+	if len(mismatchSymbols) > 0 {
+		return fmt.Errorf("found open positions without active rounds: %v on %s", mismatchSymbols, s.futuresSession.Exchange.Name())
 	}
 
 	// initialize cost estimator
@@ -549,17 +549,18 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 
 	// enque closed active rounds
 	for _, round := range s.activeRounds {
-		if round.State() == RoundClosed {
-			s.logger.Infof("move round to closed queue: %s", round)
-			// stop the round
-			round.Stop()
-			// remove from active round queue
-			delete(s.activeRounds, round.SpotSymbol())
-			// add to closed round queue for cleanup
-			s.closedRounds[round.SpotSymbol()] = &CloseRoundTask{
-				Round:    round,
-				RetryCnt: 0,
-			}
+		if round.State() != RoundClosed {
+			continue
+		}
+		s.logger.Infof("move round to closed queue: %s", round)
+		// stop the round
+		round.Stop()
+		// remove from active round queue
+		delete(s.activeRounds, round.SpotSymbol())
+		// add to closed round queue for cleanup
+		s.closedRounds[round.SpotSymbol()] = &CloseRoundTask{
+			Round:    round,
+			RetryCnt: 0,
 		}
 	}
 
