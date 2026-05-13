@@ -15,6 +15,7 @@ import (
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/sirupsen/logrus"
+	"github.com/slack-go/slack"
 	"golang.org/x/time/rate"
 )
 
@@ -572,7 +573,7 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 			}
 			continue
 		}
-		if err := s.handleClosedRound(ctx, closedRound.Round, tickTime); err != nil {
+		if err := s.handleClosedRound(ctx, closedRound, tickTime); err != nil {
 			closedRound.RetryCnt++
 		} else {
 			s.logger.Infof("successfully handled closed round: %s", closedRound.Round)
@@ -980,20 +981,28 @@ type CloseRoundTask struct {
 	Notified bool            `json:"notified"`
 }
 
-func (s *Strategy) handleClosedRound(ctx context.Context, round *ArbitrageRound, tickTime time.Time) error {
+func (c *CloseRoundTask) SlackAttachment() slack.Attachment {
+	roundAttachment := c.Round.SlackAttachment()
+	return slack.Attachment{
+		Title:  fmt.Sprintf("Round Cleanup Task %s", c.Round.FuturesSymbol()),
+		Color:  roundAttachment.Color,
+		Fields: roundAttachment.Fields,
+	}
+}
+
+func (s *Strategy) handleClosedRound(ctx context.Context, task *CloseRoundTask, tickTime time.Time) error {
+	round := task.Round
 	futuresOrderbook := s.futuresOrderBooks[round.FuturesSymbol()].Copy()
 	futuresMidPrice := getMidPrice(futuresOrderbook)
 	// if the remaining quantity is too large, return an critical error and do not remove the round from active rounds, to prevent creating new round on the same symbol
 	remainingNotional := round.FuturesWorker().RemainingQuantity().Mul(futuresMidPrice)
 	if remainingNotional.Abs().Compare(s.CriticalErrorConfig.MaxRemainingNotional) >= 0 {
-		msg := fmt.Sprintf(
+		return fmt.Errorf(
 			"[handleClosedRound] remaining notional %s > %s: %s",
 			remainingNotional,
 			s.CriticalErrorConfig.MaxRemainingNotional,
 			round,
 		)
-		bbgo.Notify(msg)
-		return errors.New(msg)
 	}
 
 	// clean up open orders if there is any
