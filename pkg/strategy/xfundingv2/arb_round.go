@@ -246,21 +246,6 @@ func (r *ArbitrageRound) String() string {
 }
 
 func (r *ArbitrageRound) SlackAttachment() slack.Attachment {
-	var color string
-	switch r.syncState.State {
-	case RoundPending:
-		color = "#9C9494"
-	case RoundOpening:
-		color = "#6FCF97"
-	case RoundReady:
-		color = "#56CCF2"
-	case RoundClosing:
-		color = "#F2994A"
-	case RoundClosed:
-		color = "#B10202"
-	default:
-		color = "#9C9494"
-	}
 	title := fmt.Sprintf("Arbitrage Round %s (%s)", r.SpotSymbol(), r.syncState.State)
 	fields := []slack.AttachmentField{
 		{
@@ -323,9 +308,28 @@ func (r *ArbitrageRound) SlackAttachment() slack.Attachment {
 
 	return slack.Attachment{
 		Title:  title,
-		Color:  color,
+		Color:  r.stateColor(),
 		Fields: fields,
 	}
+}
+
+func (r *ArbitrageRound) stateColor() string {
+	var color string
+	switch r.syncState.State {
+	case RoundPending:
+		color = "#9C9494"
+	case RoundOpening:
+		color = "#6FCF97"
+	case RoundReady:
+		color = "#56CCF2"
+	case RoundClosing:
+		color = "#F2994A"
+	case RoundClosed:
+		color = "#B10202"
+	default:
+		color = "#9C9494"
+	}
+	return color
 }
 
 func (r *ArbitrageRound) TotalFundingIncome() fixedpoint.Value {
