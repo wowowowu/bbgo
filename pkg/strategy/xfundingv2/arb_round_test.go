@@ -57,11 +57,14 @@ func newTestArbitrageRound(t *testing.T, ctrl *gomock.Controller, fundingInterva
 		NextFundingTime: nextFundingTime,
 	}
 
-	round := NewArbitrageRound(fundingRate, minHoldingIntervals, fundingIntervalHours, spotWorker, futuresWorker, mockService)
+	round := NewArbitrageRound(
+		fundingRate,
+		types.ExchangeBinance, types.ExchangeBinance,
+		minHoldingIntervals, fundingIntervalHours, spotWorker, futuresWorker, mockService)
 	return round, mockService
 }
 
-func TestArbitrageRound_CollectedFunding(t *testing.T) {
+func TestArbitrageRound_TotalFundingIncome(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -71,7 +74,8 @@ func TestArbitrageRound_CollectedFunding(t *testing.T) {
 	t.Run("returns zero when startTime is zero", func(t *testing.T) {
 		ctx := context.Background()
 		currentTime := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-		result := round.CollectedFunding(ctx, currentTime)
+		round.SyncFundingFeeRecords(ctx, currentTime)
+		result := round.TotalFundingIncome()
 		assert.Equal(t, fixedpoint.Zero, result)
 	})
 
@@ -100,7 +104,8 @@ func TestArbitrageRound_CollectedFunding(t *testing.T) {
 
 		ctx := context.Background()
 		currentTime := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-		result := round.CollectedFunding(ctx, currentTime)
+		round.SyncFundingFeeRecords(ctx, currentTime)
+		result := round.TotalFundingIncome()
 
 		expected := Number(0.005).Add(Number(0.003))
 		assert.Equal(t, expected, result)
@@ -110,7 +115,8 @@ func TestArbitrageRound_CollectedFunding(t *testing.T) {
 		// Call again with same income history - should not double-count
 		ctx := context.Background()
 		currentTime := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-		result := round.CollectedFunding(ctx, currentTime)
+		round.SyncFundingFeeRecords(ctx, currentTime)
+		result := round.TotalFundingIncome()
 
 		expected := Number(0.005).Add(Number(0.003))
 		assert.Equal(t, expected, result)
@@ -129,7 +135,8 @@ func TestArbitrageRound_CollectedFunding(t *testing.T) {
 
 		ctx := context.Background()
 		currentTime := time.Date(2024, 1, 2, 8, 0, 0, 0, time.UTC)
-		result := round.CollectedFunding(ctx, currentTime)
+		round.SyncFundingFeeRecords(ctx, currentTime)
+		result := round.TotalFundingIncome()
 
 		expected := Number(0.005).Add(Number(0.003)).Add(Number(0.002))
 		assert.Equal(t, expected, result)

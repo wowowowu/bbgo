@@ -12,7 +12,6 @@ import (
 
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/datasource/coinmarketcap"
-	"github.com/c9s/bbgo/pkg/exchange/binance"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/sirupsen/logrus"
@@ -263,7 +262,8 @@ func (s *Strategy) CrossRun(
 	// NOTE: the executors should be created first before anything else to ensure the executors get updated first.
 	// The twap executors rely on the state of the general order executors to determine the filled quantity.
 	s.candidateSymbols = candidateSymbols
-	for _, symbol := range candidateSymbols {
+	candidateSymbolsMap := make(map[string]struct{})
+	setupGeneralExecutorsForSymbol := func(symbol string) error {
 		spotMarket, found := s.spotSession.Market(symbol)
 		if !found {
 			return fmt.Errorf("market %s not found in spot session", symbol)
@@ -315,6 +315,13 @@ func (s *Strategy) CrossRun(
 		futuresExecutor.DisableNotify()
 		futuresExecutor.Bind()
 		s.futuresGeneralOrderExecutors[symbol] = futuresExecutor
+		return nil
+	}
+	for _, symbol := range candidateSymbols {
+		candidateSymbolsMap[symbol] = struct{}{}
+		if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
+			return err
+		}
 	}
 
 	if s.FeeSymbol != "" {
@@ -345,13 +352,19 @@ func (s *Strategy) CrossRun(
 		s.spotGeneralOrderExecutors[s.FeeSymbol] = spotExecutor
 	}
 
+	if futuresInfoService, ok := s.futuresSession.Exchange.(FuturesInfoService); !ok {
+		return fmt.Errorf("futures session exchange does not support futures info service: %s", s.futuresSession.ExchangeName)
+	} else {
+		s.preliminaryMarketSelector = NewMarketSelector(*s.MarketSelectionConfig, futuresInfoService, s.logger)
+	}
+
 	// initialize depth books for model selection
 	// we create new stream here to save the bandwidth of the market data stream of the sessions
 	futureStream := s.futuresSession.Exchange.NewStream()
 	futureStream.SetPublicOnly()
 	spotStream := s.spotSession.Exchange.NewStream()
 	spotStream.SetPublicOnly()
-	for _, symbol := range candidateSymbols {
+	setupStreamBooksForSymbol := func(symbol string) {
 		futuresBook := types.NewStreamBook(symbol, s.futuresSession.ExchangeName)
 		futuresBook.BindStream(futureStream)
 		futureStream.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
@@ -362,6 +375,9 @@ func (s *Strategy) CrossRun(
 		spotStream.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
 		s.spotOrderBooks[symbol] = spotBook
 	}
+	for _, symbol := range candidateSymbols {
+		setupStreamBooksForSymbol(symbol)
+	}
 	// subscribe fee symbol order book for trading fee estimation
 	if s.FeeSymbol != "" {
 		spotBook := types.NewStreamBook(s.FeeSymbol, s.spotSession.ExchangeName)
@@ -369,26 +385,43 @@ func (s *Strategy) CrossRun(
 		spotStream.Subscribe(types.BookChannel, s.FeeSymbol, types.SubscribeOptions{})
 		s.spotOrderBooks[s.FeeSymbol] = spotBook
 	}
-	if err := futureStream.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect future stream books: %w", err)
-	}
-	if err := spotStream.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect spot stream books: %w", err)
-	}
-
-	binanceEx, _ := s.futuresSession.Exchange.(*binance.Exchange)
-	s.preliminaryMarketSelector = NewMarketSelector(*s.MarketSelectionConfig, binanceEx, s.logger)
-
 	// runtime init done, load pending and active rounds
 	for symbol, pendingRound := range s.pendingRounds {
+		// setup order executors
+		if _, found := candidateSymbolsMap[symbol]; !found {
+			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
+				return fmt.Errorf("failed to setup order executors for pending round symbol %s: %w", symbol, err)
+			}
+		}
+		// setup stream books for the symbols
+		if _, found := candidateSymbolsMap[symbol]; !found {
+			setupStreamBooksForSymbol(symbol)
+		}
 		if err := pendingRound.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("failed to restore pending round (%s): %w", symbol, err)
 		}
 	}
 	for symbol, activeRound := range s.activeRounds {
+		// setup order executors
+		if _, found := candidateSymbolsMap[symbol]; !found {
+			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
+				return fmt.Errorf("failed to setup order executors for active round symbol %s: %w", symbol, err)
+			}
+		}
+		// setup stream books for the symbols
+		if _, found := candidateSymbolsMap[symbol]; !found {
+			setupStreamBooksForSymbol(symbol)
+		}
 		if err := activeRound.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
 		}
+	}
+
+	if err := futureStream.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect future stream books: %w", err)
+	}
+	if err := spotStream.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect spot stream books: %w", err)
 	}
 
 	// setup callbacks
@@ -424,6 +457,7 @@ func (s *Strategy) CrossRun(
 	bbgo.OnShutdown(ctx, func(ctx context.Context, wg *sync.WaitGroup) {
 		defer wg.Done()
 		s.logger.Infof("shutting down %s", s.InstanceID())
+		// persist state
 		bbgo.Sync(ctx, s)
 		s.logger.Infof("state persisted for %s", s.InstanceID())
 	})
@@ -451,9 +485,10 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 	// remove closed active rounds
 	for _, round := range s.activeRounds {
 		if round.State() == RoundClosed {
-			s.handleRoundExit(ctx, round, tickTime)
+			s.logger.Infof("removing closed round: %s", round)
+			delete(s.activeRounds, round.SpotSymbol())
+			s.handleClosedRound(ctx, round, tickTime)
 		}
-		// TODO: insert closed round records into database
 	}
 
 	// 2. check if new round can be opened or existing round needs to be adjusted
@@ -614,6 +649,8 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 			}
 			round := NewArbitrageRound(
 				selectedCandidate.PremiumIndex,
+				s.spotSession.Exchange.Name(),
+				s.futuresSession.Exchange.Name(),
 				selectedCandidate.MinHoldingIntervals,
 				selectedCandidate.FundingIntervalHours,
 				spotTwap,
@@ -622,19 +659,15 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 			)
 			round.SetLogger(s.logger)
 			round.SetSpotExchangeFeeRates(
-				map[types.ExchangeName]types.ExchangeFee{
-					s.spotSession.ExchangeName: {
-						MakerFeeRate: s.spotSession.MakerFeeRate,
-						TakerFeeRate: s.spotSession.TakerFeeRate,
-					},
+				types.ExchangeFee{
+					MakerFeeRate: s.spotSession.MakerFeeRate,
+					TakerFeeRate: s.spotSession.TakerFeeRate,
 				},
 			)
 			round.SetFuturesExchangeFeeRates(
-				map[types.ExchangeName]types.ExchangeFee{
-					s.futuresSession.ExchangeName: {
-						MakerFeeRate: s.futuresSession.MakerFeeRate,
-						TakerFeeRate: s.futuresSession.TakerFeeRate,
-					},
+				types.ExchangeFee{
+					MakerFeeRate: s.futuresSession.MakerFeeRate,
+					TakerFeeRate: s.futuresSession.TakerFeeRate,
 				},
 			)
 			// save as pending round for the fee asset preparation
@@ -780,7 +813,8 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) *Mar
 	if len(breakevenIntervals) == 0 {
 		return nil
 	}
-	sortedCandidates := candidates
+	// shallow copy the candidates slice
+	sortedCandidates := append([]MarketCandidate(nil), candidates...)
 	sort.Slice(sortedCandidates, func(i, j int) bool {
 		candidate1 := sortedCandidates[i]
 		candidate2 := sortedCandidates[j]
@@ -838,7 +872,7 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 	return breakEvenIntervals, nil
 }
 
-func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound, tickTime time.Time) {
+func (s *Strategy) handleClosedRound(ctx context.Context, round *ArbitrageRound, tickTime time.Time) {
 	// stop the round
 	round.Stop()
 
@@ -865,11 +899,11 @@ func (s *Strategy) handleRoundExit(ctx context.Context, round *ArbitrageRound, t
 		}
 	}
 
-	s.logger.Infof("removing closed round: %s", round)
-	delete(s.activeRounds, round.SpotSymbol())
 	if executor, ok := s.spotGeneralOrderExecutors[s.FeeSymbol]; ok {
 		feeAvgCost := executor.Position().AverageCost
 		round.SetAvgFeeCost(s.FeeSymbol, feeAvgCost)
 	}
+	round.SyncFundingFeeRecords(ctx, tickTime)
 	bbgo.Notify(round.PnL(ctx, tickTime))
+	// TODO: insert closed round records into database
 }

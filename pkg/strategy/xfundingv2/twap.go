@@ -3,7 +3,6 @@ package xfundingv2
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -55,10 +54,6 @@ type TWAPWorkerConfig struct {
 }
 
 type TWAPWorker struct {
-	// sync.Mutex protects fields mutated by the background trade goroutine:
-	// filledQuantity, activeOrder, trades, state
-	mu sync.Mutex
-
 	syncState TWAPWorkerSyncState
 
 	ctx    context.Context
@@ -122,43 +117,24 @@ func (w *TWAPWorker) Executor() *TWAPExecutor {
 }
 
 func (w *TWAPWorker) State() TWAPWorkerState {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	return w.syncState.State
 }
 
 func (w *TWAPWorker) IsDone() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	return w.syncState.State == TWAPWorkerStateDone
 }
 
 func (w *TWAPWorker) AveragePrice() fixedpoint.Value {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	trades := w.syncState.TWAPExecutor.AllTrades()
 	return tradingutil.AveragePriceFromTrades(trades)
 }
 
-func (w *TWAPWorker) FilledPosition() fixedpoint.Value {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	return w.filledPosition()
-}
-
 // AddTrade adds a trade to the worker if it belongs to an order managed by this worker.
 func (w *TWAPWorker) AddTrade(trade types.Trade) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	w.syncState.TWAPExecutor.AddTrade(trade)
 }
 
-func (w *TWAPWorker) filledPosition() fixedpoint.Value {
+func (w *TWAPWorker) FilledPosition() fixedpoint.Value {
 	trades := w.syncState.TWAPExecutor.AllTrades()
 	position := fixedpoint.Zero
 	for _, t := range trades {
@@ -172,9 +148,6 @@ func (w *TWAPWorker) filledPosition() fixedpoint.Value {
 }
 
 func (w *TWAPWorker) TotalFee() map[string]fixedpoint.Value {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	trades := w.syncState.TWAPExecutor.AllTrades()
 	feeMap := make(map[string]fixedpoint.Value)
 	for _, t := range trades {
@@ -187,37 +160,21 @@ func (w *TWAPWorker) TotalFee() map[string]fixedpoint.Value {
 }
 
 func (w *TWAPWorker) ActiveOrder() *types.Order {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	return w.syncState.ActiveOrder
 }
 
 func (w *TWAPWorker) RemainingQuantity() fixedpoint.Value {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	return w.remainingQuantity()
-}
-
-func (w *TWAPWorker) remainingQuantity() fixedpoint.Value {
 	// remaining = target - filled
 	// NOTE: the remaining quantity can be positive or negative.
-	return w.syncState.TargetPosition.Sub(w.filledPosition())
+	return w.syncState.TargetPosition.Sub(w.FilledPosition())
 }
 
 func (w *TWAPWorker) TargetPosition() fixedpoint.Value {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	return w.syncState.TargetPosition
 }
 
 func (w *TWAPWorker) Start(ctx context.Context, currentTime time.Time) error {
 	// worker should be able to start only once from pending state
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if w.syncState.State != TWAPWorkerStatePending {
 		return fmt.Errorf("cannot start TWAPWorker: expected state Pending, got %s", w.syncState.State)
 	}
@@ -233,7 +190,7 @@ func (w *TWAPWorker) Start(ctx context.Context, currentTime time.Time) error {
 	w.syncState.TWAPExecutor.SetLogger(w.logger)
 	w.syncState.TWAPExecutor.Start()
 
-	w.resetTime(currentTime, w.syncState.Config.Duration)
+	w.ResetTime(currentTime, w.syncState.Config.Duration)
 
 	w.logger.Infof(
 		"[TWAP Start] started: targetPosition=%s, duration=%s, interval=%s",
@@ -245,9 +202,6 @@ func (w *TWAPWorker) Start(ctx context.Context, currentTime time.Time) error {
 }
 
 func (w *TWAPWorker) RemainingDuration(currentTime time.Time) time.Duration {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if currentTime.After(w.syncState.EndTime) {
 		return 0
 	}
@@ -258,13 +212,6 @@ func (w *TWAPWorker) RemainingDuration(currentTime time.Time) time.Duration {
 // It can be used to extend the execution time by resetting the end time to a later time.
 // ex: TWAP worker is opening a position and then switch to closing the position, we can reset the time for the closing.
 func (w *TWAPWorker) ResetTime(currentTime time.Time, duration time.Duration) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	w.resetTime(currentTime, duration)
-}
-
-func (w *TWAPWorker) resetTime(currentTime time.Time, duration time.Duration) {
 	w.syncState.State = TWAPWorkerStateRunning
 	w.syncState.StartTime = currentTime
 	w.syncState.Config.Duration = duration
@@ -287,9 +234,6 @@ func (w *TWAPWorker) resetTime(currentTime time.Time, duration time.Duration) {
 
 // Stop stops the TWAP worker and cancels any active order on the exchange.
 func (w *TWAPWorker) Stop() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if w.syncState.State == TWAPWorkerStateRunning || w.syncState.State == TWAPWorkerStatePending {
 		if w.syncState.ActiveOrder != nil {
 			err := w.syncState.TWAPExecutor.CancelOrder(w.ctx, *w.syncState.ActiveOrder)
@@ -307,7 +251,7 @@ func (w *TWAPWorker) Stop() {
 		w.syncState.ActiveOrder = nil
 		w.logger.Infof(
 			"[TWAP Stop] stopped: filled=%s / target=%s",
-			w.filledPosition(), w.syncState.TargetPosition,
+			w.FilledPosition(), w.syncState.TargetPosition,
 		)
 	}
 }
@@ -335,13 +279,6 @@ func (w *TWAPWorker) syncAndResetActiveOrder() *types.Order {
 // current time and an orderbook snapshot. It handles cancel-and-replace for
 // maker orders, scheduling, quantity/price calculation, and order submission.
 func (w *TWAPWorker) Tick(currentTime time.Time, orderBook types.OrderBook) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	return w.tick(currentTime, orderBook)
-}
-
-func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) error {
 	defer func() {
 		if currentTime.After(w.syncState.CurrentIntervalEnd) {
 			w.syncState.CurrentIntervalStart = w.syncState.CurrentIntervalEnd
@@ -371,7 +308,7 @@ func (w *TWAPWorker) tick(currentTime time.Time, orderBook types.OrderBook) erro
 	// it's running and currentTime is after the current interval start
 	// time to check if we need to place/cancel/replace orders
 	// NOTE: remaining can be positive or negative
-	remaining := w.remainingQuantity()
+	remaining := w.RemainingQuantity()
 
 	// target reached, do nothing
 	if remaining.IsZero() {

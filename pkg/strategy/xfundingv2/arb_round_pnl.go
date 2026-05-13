@@ -41,7 +41,7 @@ func (r *ArbitrageRound) PnL(ctx context.Context, currentTime time.Time) RoundPn
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	fundingIncome := r.collectedFunding(ctx, currentTime)
+	fundingIncome := r.totalFundingIncome()
 
 	spotMarket := r.spotWorker.Market()
 	futuresMarket := r.futuresWorker.Market()

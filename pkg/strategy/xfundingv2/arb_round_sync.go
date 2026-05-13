@@ -13,24 +13,28 @@ import (
 
 func (r *ArbitrageRound) Initialize(ctx context.Context, s *Strategy) error {
 	r.SetLogger(s.logger)
+	if s.futuresSession.Exchange.Name() != r.syncState.FuturesExchangeName {
+		return fmt.Errorf("[ArbitrageRound] futures exchange name mismatch: expected %s, got %s",
+			r.syncState.FuturesExchangeName, s.futuresSession.Exchange.Name())
+	}
 	r.SetFuturesExchangeFeeRates(
-		map[types.ExchangeName]types.ExchangeFee{
-			s.futuresSession.Exchange.Name(): {
-				MakerFeeRate: s.futuresSession.MakerFeeRate,
-				TakerFeeRate: s.futuresSession.TakerFeeRate,
-			},
+		types.ExchangeFee{
+			MakerFeeRate: s.futuresSession.MakerFeeRate,
+			TakerFeeRate: s.futuresSession.TakerFeeRate,
 		},
 	)
+	if s.spotSession.Exchange.Name() != r.syncState.SpotExchangeName {
+		return fmt.Errorf("[ArbitrageRound] spot exchange name mismatch: expected %s, got %s",
+			r.syncState.SpotExchangeName, s.spotSession.Exchange.Name())
+	}
 	r.SetSpotExchangeFeeRates(
-		map[types.ExchangeName]types.ExchangeFee{
-			s.spotSession.Exchange.Name(): {
-				MakerFeeRate: s.spotSession.MakerFeeRate,
-				TakerFeeRate: s.spotSession.TakerFeeRate,
-			},
+		types.ExchangeFee{
+			MakerFeeRate: s.spotSession.MakerFeeRate,
+			TakerFeeRate: s.spotSession.TakerFeeRate,
 		},
 	)
-	r.retryTransferTickC = make(chan time.Time)
-	if !r.HasStarted() {
+	r.retryTransferTickC = make(chan time.Time, 100)
+	if r.HasStarted() {
 		// the round has been started before, we need to start the retry worker
 		go r.retryTransferWorker(ctx, r.retryTransferTickC)
 	}
