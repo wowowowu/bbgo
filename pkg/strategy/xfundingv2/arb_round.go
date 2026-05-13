@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/slack-go/slack"
 
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/exchange/batch"
@@ -242,6 +243,89 @@ func (r *ArbitrageRound) String() string {
 		r.syncState.ClosingTime.Format(time.RFC3339),
 		r.syncState.ClosingTime.Add(r.syncState.ClosingDuration).Format(time.RFC3339),
 	)
+}
+
+func (r *ArbitrageRound) SlackAttachment() slack.Attachment {
+	var color string
+	switch r.syncState.State {
+	case RoundPending:
+		color = "#9C9494"
+	case RoundOpening:
+		color = "#6FCF97"
+	case RoundReady:
+		color = "#56CCF2"
+	case RoundClosing:
+		color = "#F2994A"
+	case RoundClosed:
+		color = "#B10202"
+	default:
+		color = "#9C9494"
+	}
+	title := fmt.Sprintf("Arbitrage Round %s (%s)", r.SpotSymbol(), r.syncState.State)
+	fields := []slack.AttachmentField{
+		{
+			Title: "Target Spot Position",
+			Value: r.syncState.TriggeredSpotTargetPosition.String(),
+			Short: true,
+		},
+		{
+			Title: "Funding Interval in Hours",
+			Value: fmt.Sprintf("%d", r.syncState.FundingIntervalHours),
+			Short: true,
+		},
+		{
+			Title: "Triggered Funding Rate",
+			Value: r.syncState.TriggeredFundingRate.Percentage(),
+			Short: true,
+		},
+		{
+			Title: "Annualized Funding Rate",
+			Value: r.AnnualizedRate().Percentage(),
+			Short: true,
+		},
+	}
+	if r.State() == RoundClosing {
+		fields = append(fields,
+			slack.AttachmentField{
+				Title: "Closing Time",
+				Value: r.syncState.ClosingTime.Format(time.RFC3339),
+				Short: true,
+			},
+			slack.AttachmentField{
+				Title: "Expected Close Time",
+				Value: r.syncState.ClosingTime.Add(r.syncState.ClosingDuration).Format(time.RFC3339),
+				Short: true,
+			})
+	} else if r.HasStarted() {
+		fields = append(fields,
+			slack.AttachmentField{
+				Title: "Start Time",
+				Value: r.syncState.StartTime.Format(time.RFC3339),
+				Short: true,
+			},
+			slack.AttachmentField{
+				Title: "Min Holding Intervals",
+				Value: fmt.Sprintf("%d", r.syncState.MinHoldingIntervals),
+				Short: true,
+			})
+	}
+	fields = append(fields,
+		slack.AttachmentField{
+			Title: "Funding Interval Start",
+			Value: r.syncState.FundingIntervalStart.Format(time.RFC3339),
+			Short: true,
+		},
+		slack.AttachmentField{
+			Title: "Funding Interval End",
+			Value: r.syncState.FundingIntervalEnd.Format(time.RFC3339),
+			Short: true,
+		})
+
+	return slack.Attachment{
+		Title:  title,
+		Color:  color,
+		Fields: fields,
+	}
 }
 
 func (r *ArbitrageRound) TotalFundingIncome() fixedpoint.Value {
