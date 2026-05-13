@@ -386,35 +386,34 @@ func (s *Strategy) CrossRun(
 		s.spotOrderBooks[s.FeeSymbol] = spotBook
 	}
 	// runtime init done, load pending and active rounds
-	roundSymbols := make(map[string]struct{})
 	for symbol, pendingRound := range s.pendingRounds {
-		roundSymbols[symbol] = struct{}{}
+		// setup order executors
 		if _, found := candidateSymbolsMap[symbol]; !found {
 			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
 				return fmt.Errorf("failed to setup order executors for pending round symbol %s: %w", symbol, err)
 			}
+		}
+		// setup stream books for the symbols
+		if _, found := candidateSymbolsMap[symbol]; !found {
+			setupStreamBooksForSymbol(symbol)
 		}
 		if err := pendingRound.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("failed to restore pending round (%s): %w", symbol, err)
 		}
 	}
 	for symbol, activeRound := range s.activeRounds {
-		roundSymbols[symbol] = struct{}{}
+		// setup order executors
 		if _, found := candidateSymbolsMap[symbol]; !found {
 			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
 				return fmt.Errorf("failed to setup order executors for active round symbol %s: %w", symbol, err)
 			}
 		}
-		if err := activeRound.Initialize(ctx, s); err != nil {
-			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
-		}
-	}
-
-	// setup stream books for the symbols in the pending and active rounds but not in the candidate list.
-	// This ensures the strategy can keep running and update the states of the rounds even if the symbols are delisted from the market selection.
-	for symbol := range roundSymbols {
+		// setup stream books for the symbols
 		if _, found := candidateSymbolsMap[symbol]; !found {
 			setupStreamBooksForSymbol(symbol)
+		}
+		if err := activeRound.Initialize(ctx, s); err != nil {
+			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
 		}
 	}
 
