@@ -169,6 +169,9 @@ func (s *Strategy) Initialize() error {
 		s.MaxPositionExposure = make(map[string]fixedpoint.Value)
 	}
 	s.MaxClosedRetryCnt = 3
+	if s.CircuitBreakers == nil {
+		s.CircuitBreakers = make(map[string]*circuitbreaker.BasicCircuitBreaker)
+	}
 	return nil
 }
 
@@ -433,8 +436,9 @@ func (s *Strategy) CrossRun(
 		spotStream.Subscribe(types.BookChannel, s.FeeSymbol, types.SubscribeOptions{})
 		s.spotOrderBooks[s.FeeSymbol] = spotBook
 	}
-	// runtime init done, load pending and active rounds
-	for symbol, pendingRound := range s.pendingRounds {
+	// runtime init done, setup all rounds
+	for _, round := range s.allRounds() {
+		symbol := round.SpotSymbol()
 		// setup order executors
 		if _, found := s.spotGeneralOrderExecutors[symbol]; !found {
 			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
@@ -445,39 +449,33 @@ func (s *Strategy) CrossRun(
 		if _, found := s.spotOrderBooks[symbol]; !found {
 			setupStreamBooksForSymbol(symbol)
 		}
-		if err := pendingRound.Round.Initialize(ctx, s); err != nil {
-			return fmt.Errorf("failed to restore pending round (%s): %w", symbol, err)
+		if err := round.Initialize(ctx, s); err != nil {
+			return fmt.Errorf("failed to restore round (%s): %w", round, err)
+		}
+		// circuit breaker setup
+		if breaker, found := s.CircuitBreakers[symbol]; !found {
+			s.CircuitBreakers[symbol] = s.defaultBreaker(symbol)
+		} else {
+			breaker.SetMetricsInfo(
+				s.ID(),
+				s.InstanceID(),
+				symbol,
+			)
 		}
 	}
-	for symbol, activeRound := range s.activeRounds {
-		// setup order executors
-		if _, found := s.spotGeneralOrderExecutors[symbol]; !found {
-			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
-				return fmt.Errorf("failed to setup order executors for active round symbol %s: %w", symbol, err)
-			}
-		}
-		// setup stream books for the symbols
-		if _, found := s.spotOrderBooks[symbol]; !found {
-			setupStreamBooksForSymbol(symbol)
-		}
-		if err := activeRound.Initialize(ctx, s); err != nil {
-			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
+	for _, symbol := range s.candidateSymbols {
+		if breaker, found := s.CircuitBreakers[symbol]; !found {
+			s.CircuitBreakers[symbol] = s.defaultBreaker(symbol)
+		} else {
+			breaker.SetMetricsInfo(
+				s.ID(),
+				s.InstanceID(),
+				symbol,
+			)
 		}
 	}
-	for symbol, closedRound := range s.closedRounds {
-		// setup order executors
-		if _, found := s.spotGeneralOrderExecutors[symbol]; !found {
-			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
-				return fmt.Errorf("failed to setup order executors for active round symbol %s: %w", symbol, err)
-			}
-		}
-		// setup stream books for the symbols
-		if _, found := s.spotOrderBooks[symbol]; !found {
-			setupStreamBooksForSymbol(symbol)
-		}
-		if err := closedRound.Round.Initialize(ctx, s); err != nil {
-			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
-		}
+
+	for _, closedRound := range s.closedRounds {
 		// give the restored closed round one more chance to be processed.
 		if closedRound.RetryCnt >= s.MaxClosedRetryCnt {
 			closedRound.RetryCnt--
@@ -545,6 +543,13 @@ func (s *Strategy) allRounds() []*ArbitrageRound {
 		rounds = append(rounds, closedRound.Round)
 	}
 	return rounds
+}
+
+func (s *Strategy) defaultBreaker(symbol string) *circuitbreaker.BasicCircuitBreaker {
+	newBreaker := circuitbreaker.NewBasicCircuitBreaker(s.ID(), s.InstanceID(), symbol)
+	newBreaker.MaximumConsecutiveLossTimes = 2
+	newBreaker.HaltDuration = types.Duration(time.Hour * 16)
+	return newBreaker
 }
 
 func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
@@ -1092,6 +1097,8 @@ func (s *Strategy) handleClosedRound(ctx context.Context, task *CloseRoundTask, 
 	bbgo.Notify(pnl)
 	if breaker, found := s.CircuitBreakers[round.SpotSymbol()]; found {
 		breaker.RecordProfit(pnl.NetPnL(), tickTime)
+	} else {
+		s.logger.Warnf("circuit breaker not found for symbol %s when recording profit: %s", round.SpotSymbol(), pnl)
 	}
 	// TODO: insert closed round records into database
 	return nil
