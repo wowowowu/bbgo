@@ -35,6 +35,15 @@ func (p *RoundPnL) SlackAttachment() slack.Attachment {
 		},
 	}
 }
+
+func (p *RoundPnL) NetPnL() fixedpoint.Value {
+	return p.FundingIncome.Add(
+		p.SpotProfitStats.AccumulatedNetProfit,
+	).Add(
+		p.FuturesProfitStats.AccumulatedNetProfit,
+	)
+}
+
 func (r *ArbitrageRound) PnL() RoundPnL {
 	r.mu.Lock()
 	defer r.mu.Unlock()

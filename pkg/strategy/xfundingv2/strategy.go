@@ -13,6 +13,7 @@ import (
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/datasource/coinmarketcap"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/risk/circuitbreaker"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/sirupsen/logrus"
 	"github.com/slack-go/slack"
@@ -60,9 +61,10 @@ type Strategy struct {
 	MarketSelectionConfig *MarketSelectionConfig      `json:"marketSelection,omitempty"`
 	MaxPositionExposure   map[string]fixedpoint.Value `json:"maxPositionExposure"`
 
-	CheckInterval       time.Duration       `json:"checkInterval"`
-	ClosePositionOnExit bool                `json:"closePositionOnExit"`
-	CriticalErrorConfig CriticalErrorConfig `json:"criticalErrorConfig"`
+	CheckInterval       time.Duration                                  `json:"checkInterval"`
+	ClosePositionOnExit bool                                           `json:"closePositionOnExit"`
+	CriticalErrorConfig CriticalErrorConfig                            `json:"criticalErrorConfig"`
+	CircuitBreakers     map[string]*circuitbreaker.BasicCircuitBreaker `json:"circuitBreakers"`
 
 	spotSession, futuresSession *bbgo.ExchangeSession
 	futuresService              FuturesService
@@ -752,7 +754,7 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 			// no profitable candidate found, nothing to do
 			return
 		}
-		if !s.canOpenRound(selectedCandidate.Symbol) {
+		if !s.canOpenRound(selectedCandidate.Symbol, currentTime) {
 			// already has pending or active round for the symbol, skip
 			return
 		}
@@ -1086,14 +1088,25 @@ func (s *Strategy) handleClosedRound(ctx context.Context, task *CloseRoundTask, 
 	if err := round.SyncFundingFeeRecords(ctx, tickTime); err != nil {
 		return fmt.Errorf("[handleClosedRound] failed to sync funding fee records for round %s: %w", round, err)
 	}
-	bbgo.Notify(round.PnL())
+	pnl := round.PnL()
+	bbgo.Notify(pnl)
+	if breaker, found := s.CircuitBreakers[round.SpotSymbol()]; found {
+		breaker.RecordProfit(pnl.NetPnL(), tickTime)
+	}
 	// TODO: insert closed round records into database
 	return nil
 }
 
-func (s *Strategy) canOpenRound(symbol string) bool {
+func (s *Strategy) canOpenRound(symbol string, currentTime time.Time) bool {
 	_, pending := s.pendingRounds[symbol]
 	_, active := s.activeRounds[symbol]
 	_, closed := s.closedRounds[symbol]
-	return !pending && !active && !closed
+	var isHalted bool
+	if breaker, found := s.CircuitBreakers[symbol]; found {
+		if reason, halted := breaker.IsHalted(currentTime); halted {
+			isHalted = true
+			s.logger.Warnf("circuit breaker is triggered for symbol %s: %s", symbol, reason)
+		}
+	}
+	return !pending && !active && !closed && !isHalted
 }
