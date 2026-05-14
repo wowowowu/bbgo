@@ -45,7 +45,7 @@ func (o *TWAPExecutor) Initialize(s *Strategy) error {
 	} else {
 		return errors.New("[TWAPExecutor] session exchange does not implement ExchangeOrderQueryService")
 	}
-	// sync orders
+	// sync orders/trades
 	orderStore := executor.OrderStore()
 	for _, query := range o.syncState.Orders {
 		order, err := o.exchange.QueryOrder(o.ctx, query)
@@ -53,6 +53,14 @@ func (o *TWAPExecutor) Initialize(s *Strategy) error {
 			return fmt.Errorf("[TWAPExecutor] failed to query order %v: %w", query, err)
 		}
 		orderStore.Add(*order)
+
+		trades, err := o.exchange.QueryOrderTrades(o.ctx, query)
+		if err != nil {
+			return fmt.Errorf("[TWAPExecutor] failed to query trades for order %v: %w", query, err)
+		}
+		for _, trade := range trades {
+			o.syncState.Trades[trade.ID] = trade
+		}
 	}
 	return nil
 }
