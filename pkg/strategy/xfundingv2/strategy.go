@@ -1055,7 +1055,9 @@ func (s *Strategy) handleClosedRound(ctx context.Context, task *CloseRoundTask, 
 		feeAvgCost := executor.Position().AverageCost
 		round.SetAvgFeeCost(s.FeeSymbol, feeAvgCost)
 	}
-	round.SyncFundingFeeRecords(ctx, tickTime)
+	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	round.SyncFundingFeeRecords(timedCtx, tickTime)
 	bbgo.Notify(round.PnL(ctx, tickTime))
 	// TODO: insert closed round records into database
 	return nil
