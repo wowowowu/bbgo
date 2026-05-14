@@ -70,10 +70,12 @@ func (o *TWAPExecutor) Start() {
 
 // AddTrade adds a trade to the executor's internal trade list if it belongs to
 // an order managed by this executor.
-func (o *TWAPExecutor) AddTrade(trade types.Trade) {
-	if _, exists := o.syncState.Orders[trade.OrderID]; exists {
+func (o *TWAPExecutor) AddTrade(trade types.Trade) bool {
+	_, exists := o.syncState.Orders[trade.OrderID]
+	if exists {
 		o.syncState.Trades[trade.ID] = trade
 	}
+	return exists
 }
 
 func (o *TWAPExecutor) Stop() error {
