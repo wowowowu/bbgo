@@ -578,6 +578,7 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 		}
 	}
 
+	closeRoundCtx, cancelCloseRound := context.WithTimeout(ctx, 15*time.Second)
 	for _, closedRound := range s.closedRounds {
 		if closedRound.RetryCnt >= s.MaxClosedRetryCnt {
 			if !closedRound.Notified {
@@ -588,13 +589,15 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 			}
 			continue
 		}
-		if err := s.handleClosedRound(ctx, closedRound, tickTime); err != nil {
+
+		if err := s.handleClosedRound(closeRoundCtx, closedRound, tickTime); err != nil {
 			closedRound.RetryCnt++
 		} else {
 			s.logger.Infof("successfully handled closed round: %s", closedRound.Round)
 			delete(s.closedRounds, closedRound.Round.SpotSymbol())
 		}
 	}
+	cancelCloseRound()
 
 	// 2. check if new round can be opened or existing round needs to be adjusted
 	s.checkOpenNewRound(ctx, tickTime)
@@ -1069,9 +1072,7 @@ func (s *Strategy) handleClosedRound(ctx context.Context, task *CloseRoundTask, 
 		feeAvgCost := executor.Position().AverageCost
 		round.SetAvgFeeCost(s.FeeSymbol, feeAvgCost)
 	}
-	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	round.SyncFundingFeeRecords(timedCtx, tickTime)
+	round.SyncFundingFeeRecords(ctx, tickTime)
 	bbgo.Notify(round.PnL())
 	// TODO: insert closed round records into database
 	return nil
