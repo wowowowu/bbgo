@@ -501,7 +501,7 @@ func (s *Strategy) CrossRun(
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		for _, round := range s.activeRounds {
+		for _, round := range s.allRounds() {
 			if round.HasOrder(trade.OrderID) {
 				round.HandleSpotTrade(trade, trade.Time.Time())
 			}
@@ -511,7 +511,7 @@ func (s *Strategy) CrossRun(
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		for _, round := range s.activeRounds {
+		for _, round := range s.allRounds() {
 			if round.HasOrder(trade.OrderID) {
 				round.HandleFuturesTrade(trade, trade.Time.Time())
 			}
@@ -528,6 +528,20 @@ func (s *Strategy) CrossRun(
 	})
 
 	return nil
+}
+
+func (s *Strategy) allRounds() []*ArbitrageRound {
+	var rounds []*ArbitrageRound
+	for _, round := range s.activeRounds {
+		rounds = append(rounds, round)
+	}
+	for _, pendingRound := range s.pendingRounds {
+		rounds = append(rounds, pendingRound.Round)
+	}
+	for _, closedRound := range s.closedRounds {
+		rounds = append(rounds, closedRound.Round)
+	}
+	return rounds
 }
 
 func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
