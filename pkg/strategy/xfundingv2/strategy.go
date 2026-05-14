@@ -1072,7 +1072,9 @@ func (s *Strategy) handleClosedRound(ctx context.Context, task *CloseRoundTask, 
 		feeAvgCost := executor.Position().AverageCost
 		round.SetAvgFeeCost(s.FeeSymbol, feeAvgCost)
 	}
-	round.SyncFundingFeeRecords(ctx, tickTime)
+	if err := round.SyncFundingFeeRecords(ctx, tickTime); err != nil {
+		return fmt.Errorf("[handleClosedRound] failed to sync funding fee records for round %s: %w", round, err)
+	}
 	bbgo.Notify(round.PnL())
 	// TODO: insert closed round records into database
 	return nil
