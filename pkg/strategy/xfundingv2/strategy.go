@@ -27,6 +27,7 @@ func init() {
 
 type CriticalErrorConfig struct {
 	MaxRemainingNotional fixedpoint.Value `json:"maxRemainingNotional"`
+	MaxFundingRateFlip   fixedpoint.Value `json:"maxFundingRateFlip"`
 }
 
 type Strategy struct {
@@ -652,6 +653,16 @@ func (s *Strategy) transitOpeningOrReadyRound(ctx context.Context, round *Arbitr
 
 	// the funding rate has flipped
 	if round.TriggeredFundingRate().Sign()*fundingRate.LastFundingRate.Sign() <= 0 {
+		rateDiffAbs := fundingRate.LastFundingRate.Sub(round.TriggeredFundingRate()).Abs()
+		if rateDiffAbs.Compare(s.CriticalErrorConfig.MaxFundingRateFlip) > 0 {
+			bbgo.Notify(
+				"the funding rate flip is too large: %s -> %s (%s)",
+				round.TriggeredFundingRate(),
+				fundingRate.LastFundingRate,
+				s.CriticalErrorConfig.MaxFundingRateFlip,
+				round,
+			)
+		}
 		if round.NumHoldingIntervals(currentTime) >= round.MinHoldingIntervals() {
 			// the min holding time has passed, transit to closing
 			s.logger.Infof(
