@@ -1,9 +1,7 @@
 package xfundingv2
 
 import (
-	"context"
 	"fmt"
-	"time"
 
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/style"
@@ -37,7 +35,7 @@ func (p *RoundPnL) SlackAttachment() slack.Attachment {
 		},
 	}
 }
-func (r *ArbitrageRound) PnL(ctx context.Context, currentTime time.Time) RoundPnL {
+func (r *ArbitrageRound) PnL() RoundPnL {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/slack-go/slack"
 
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/exchange/batch"
 	"github.com/c9s/bbgo/pkg/exchange/binance/binanceapi"
+	"github.com/c9s/bbgo/pkg/exchange/retry"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 )
@@ -31,6 +33,7 @@ type FuturesService interface {
 
 	TransferFuturesAccountAsset(ctx context.Context, asset string, amount fixedpoint.Value, io types.TransferDirection) error
 	QueryPremiumIndex(ctx context.Context, symbol string) (*types.PremiumIndex, error)
+	QueryPositionRisk(ctx context.Context, symbol ...string) ([]types.PositionRisk, error)
 }
 
 type transferRetry struct {
@@ -242,6 +245,93 @@ func (r *ArbitrageRound) String() string {
 	)
 }
 
+func (r *ArbitrageRound) SlackAttachment() slack.Attachment {
+	title := fmt.Sprintf("Arbitrage Round %s (%s)", r.SpotSymbol(), r.syncState.State)
+	fields := []slack.AttachmentField{
+		{
+			Title: "Target Spot Position",
+			Value: r.syncState.TriggeredSpotTargetPosition.String(),
+			Short: true,
+		},
+		{
+			Title: "Funding Interval in Hours",
+			Value: fmt.Sprintf("%d", r.syncState.FundingIntervalHours),
+			Short: true,
+		},
+		{
+			Title: "Triggered Funding Rate",
+			Value: r.syncState.TriggeredFundingRate.Percentage(),
+			Short: true,
+		},
+		{
+			Title: "Annualized Funding Rate",
+			Value: r.AnnualizedRate().Percentage(),
+			Short: true,
+		},
+	}
+	if r.State() == RoundClosing {
+		fields = append(fields,
+			slack.AttachmentField{
+				Title: "Closing Time",
+				Value: r.syncState.ClosingTime.Format(time.RFC3339),
+				Short: true,
+			},
+			slack.AttachmentField{
+				Title: "Expected Close Time",
+				Value: r.syncState.ClosingTime.Add(r.syncState.ClosingDuration).Format(time.RFC3339),
+				Short: true,
+			})
+	} else if r.HasStarted() {
+		fields = append(fields,
+			slack.AttachmentField{
+				Title: "Start Time",
+				Value: r.syncState.StartTime.Format(time.RFC3339),
+				Short: true,
+			},
+			slack.AttachmentField{
+				Title: "Min Holding Intervals",
+				Value: fmt.Sprintf("%d", r.syncState.MinHoldingIntervals),
+				Short: true,
+			})
+	}
+	fields = append(fields,
+		slack.AttachmentField{
+			Title: "Funding Interval Start",
+			Value: r.syncState.FundingIntervalStart.Format(time.RFC3339),
+			Short: true,
+		},
+		slack.AttachmentField{
+			Title: "Funding Interval End",
+			Value: r.syncState.FundingIntervalEnd.Format(time.RFC3339),
+			Short: true,
+		})
+
+	return slack.Attachment{
+		Title:  title,
+		Color:  r.stateColor(),
+		Fields: fields,
+	}
+}
+
+func (r *ArbitrageRound) stateColor() string {
+	var color string
+	switch r.syncState.State {
+	case RoundPending:
+		color = "#9C9494"
+	case RoundOpening:
+		color = "#6FCF97"
+	case RoundReady:
+		color = "#56CCF2"
+	case RoundClosing:
+		color = "#F2994A"
+	case RoundClosed:
+		color = "#B10202"
+	default:
+		color = "#9C9494"
+	}
+	return color
+}
+
 func (r *ArbitrageRound) TotalFundingIncome() fixedpoint.Value {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -260,11 +350,11 @@ func (r *ArbitrageRound) totalFundingIncome() fixedpoint.Value {
 	return totalFunding
 }
 
-func (r *ArbitrageRound) SyncFundingFeeRecords(ctx context.Context, currentTime time.Time) {
+func (r *ArbitrageRound) SyncFundingFeeRecords(ctx context.Context, currentTime time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.syncFundingFeeRecords(ctx, currentTime)
+	return r.syncFundingFeeRecords(ctx, currentTime)
 }
 
 func (r *ArbitrageRound) Orders() map[string][]types.Order {
@@ -305,9 +395,9 @@ func (r *ArbitrageRound) hasOrder(orderID uint64) bool {
 	return spotExists || futuresExists
 }
 
-func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime time.Time) {
+func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime time.Time) error {
 	if r.syncState.StartTime.IsZero() || r.syncState.StartTime.After(currentTime) {
-		return
+		return nil
 	}
 
 	q := batch.BinanceFuturesIncomeBatchQuery{
@@ -318,11 +408,11 @@ func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 
 		case income, ok := <-dataC:
 			if !ok {
-				return
+				return nil
 			}
 			switch income.IncomeType {
 			case binanceapi.FuturesIncomeFundingFee:
@@ -336,11 +426,11 @@ func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime 
 			}
 		case err, ok := <-errC:
 			if !ok {
-				return
+				return nil
 			}
 
 			r.logger.WithError(err).Errorf("unable to query futures income history")
-			return
+			return err
 
 		}
 	}
@@ -417,12 +507,10 @@ func (r *ArbitrageRound) HandleSpotTrade(trade types.Trade, currentTime time.Tim
 }
 
 func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Time) {
-	if trade.IsFutures || !r.hasOrder(trade.OrderID) {
+	if ok := r.spotWorker.AddTrade(trade); !ok {
 		return
 	}
-
 	r.logger.Infof("handling spot trade: %s", trade)
-	r.spotWorker.AddTrade(trade)
 	// no matter the transfer succeeds or not, we should update the futures position so that we can stay in delta-neutral
 	r.syncFuturesPosition(trade)
 
@@ -461,11 +549,9 @@ func (r *ArbitrageRound) HandleFuturesTrade(trade types.Trade, currentTime time.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if !trade.IsFutures || !r.hasOrder(trade.OrderID) {
-		return
+	if ok := r.futuresWorker.AddTrade(trade); ok {
+		r.logger.Infof("handling future trade: %s", trade)
 	}
-	r.logger.Infof("handling future trade: %s", trade)
-	r.futuresWorker.AddTrade(trade)
 }
 
 func (r *ArbitrageRound) SetLogger(logger logrus.FieldLogger) {
@@ -513,6 +599,55 @@ func (r *ArbitrageRound) SetClosing(currentTime time.Time, duration time.Duratio
 	r.syncState.ClosingDuration = duration
 }
 
+func (r *ArbitrageRound) Cleanup(ctx context.Context, orderBook types.OrderBook) error {
+	if r.syncState.State != RoundClosed {
+		return fmt.Errorf("round is not closed yet: %s", r)
+	}
+	w := r.futuresWorker
+	remaining := w.RemainingQuantity()
+	if remaining.IsZero() {
+		return nil
+	}
+
+	midPrice := getMidPrice(orderBook)
+	market := w.Market()
+	if market.IsDustQuantity(remaining.Abs(), midPrice) {
+		// if the remaining is dust, we adjust it to a much larger amount
+		// With `ReduceOnly` flag, theoretically it will reduce the position to zero without creating new position.
+		remaining = market.MinNotional.Mul(fixedpoint.Two).Div(midPrice).Round(0, fixedpoint.Up)
+	}
+
+	orderOptions := TWAPExecuteOrderOptions{
+		DeadlineExceeded: true,
+		ReduceOnly:       true,
+	}
+	createdOrder, err := w.Executor().PlaceOrder(
+		remaining.Abs(),
+		orderSide(remaining),
+		orderBook,
+		orderOptions,
+	)
+	if err != nil || createdOrder == nil {
+		return fmt.Errorf("[CloseFuturesPosition] failed to place order to close remaining quantity: %w", err)
+	}
+	// collect trades for this closing order
+	exchange := w.syncState.TWAPExecutor.exchange
+	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if _, err := retry.QueryOrderTradesUntilSuccessfulLite(timedCtx, exchange, createdOrder.AsQuery()); err != nil {
+		return fmt.Errorf("[CloseFuturesPosition] failed to wait for closing order trades: %w", err)
+	}
+	risks, err := r.futuresService.QueryPositionRisk(timedCtx, r.FuturesSymbol())
+	if err != nil || len(risks) == 0 {
+		return fmt.Errorf("[CloseFuturesPosition] failed to query position risk after closing order filled: %w", err)
+	}
+	risk := risks[0]
+	if !risk.PositionAmount.IsZero() {
+		return fmt.Errorf("[CloseFuturesPosition] position is not fully closed after closing order filled, remaining position: %s %s", risk.PositionAmount, risk.Symbol)
+	}
+	return nil
+}
+
 func (r *ArbitrageRound) AnnualizedRate() fixedpoint.Value {
 	return AnnualizedRate(r.syncState.TriggeredFundingRate, r.syncState.FundingIntervalHours)
 }
@@ -520,45 +655,6 @@ func (r *ArbitrageRound) AnnualizedRate() fixedpoint.Value {
 func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBook, futuresOrderBook types.OrderBook) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	defer func() {
-		// get mid price
-		spotBid, _ := spotOrderBook.BestBid()
-		spotAsk, _ := spotOrderBook.BestAsk()
-		futuresBid, _ := futuresOrderBook.BestBid()
-		futuresAsk, _ := futuresOrderBook.BestAsk()
-		spotMidPrice := spotBid.Price.Add(spotAsk.Price).Div(fixedpoint.Two)
-		futuresMidPrice := futuresBid.Price.Add(futuresAsk.Price).Div(fixedpoint.Two)
-
-		// the state is PositionOpening
-		// check if the spot and futures positions are fully filled -> PositionReady
-		if r.syncState.State == RoundOpening {
-			spotRemaining := r.spotWorker.RemainingQuantity()
-			futuresRemaining := r.futuresWorker.RemainingQuantity()
-			spotIsDust := r.spotWorker.Market().IsDustQuantity(spotRemaining.Abs(), spotMidPrice)
-			futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresRemaining.Abs(), futuresMidPrice)
-
-			if spotIsDust && futuresIsDust {
-				r.syncState.State = RoundReady
-				return
-			}
-		}
-
-		// the state is PositionClosing
-		// check if the spot and futures positions are fully closed -> PositionClosed
-		if r.syncState.State == RoundClosing {
-			spotFilled := r.spotWorker.FilledPosition()
-			futuresFilled := r.futuresWorker.FilledPosition()
-			spotIsDust := r.spotWorker.Market().IsDustQuantity(spotFilled.Abs(), spotMidPrice)
-			futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresFilled.Abs(), futuresMidPrice)
-
-			if spotIsDust && futuresIsDust {
-				r.syncState.State = RoundClosed
-				r.logger.Infof("positions closed, arbitrage round completed: %s", r.spotWorker.Symbol())
-			}
-			return
-		}
-	}()
 
 	if r.syncState.State == RoundPending {
 		// not started yet, do nothing
@@ -585,6 +681,39 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 	// it's opening or closing, tick the workers
 	r.spotWorker.Tick(currentTime, spotOrderBook)
 	r.futuresWorker.Tick(currentTime, futuresOrderBook)
+
+	// get mid price
+	spotMidPrice := getMidPrice(spotOrderBook)
+	futuresMidPrice := getMidPrice(futuresOrderBook)
+
+	// the state is PositionOpening
+	// check if the spot and futures positions are fully filled -> PositionReady
+	if r.syncState.State == RoundOpening {
+		spotRemaining := r.spotWorker.RemainingQuantity()
+		futuresRemaining := r.futuresWorker.RemainingQuantity()
+		spotIsDust := r.spotWorker.Market().IsDustQuantity(spotRemaining.Abs(), spotMidPrice)
+		futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresRemaining.Abs(), futuresMidPrice)
+
+		if spotIsDust && futuresIsDust {
+			r.syncState.State = RoundReady
+			return
+		}
+	}
+
+	// the state is PositionClosing
+	// check if the spot and futures positions are fully closed -> PositionClosed
+	if r.syncState.State == RoundClosing {
+		spotFilled := r.spotWorker.FilledPosition()
+		futuresFilled := r.futuresWorker.FilledPosition()
+		spotIsDust := r.spotWorker.Market().IsDustQuantity(spotFilled.Abs(), spotMidPrice)
+		futuresIsDust := r.futuresWorker.Market().IsDustQuantity(futuresFilled.Abs(), futuresMidPrice)
+
+		if spotIsDust && futuresIsDust {
+			r.syncState.State = RoundClosed
+			r.logger.Infof("positions closed, arbitrage round completed: %s", r.spotWorker.Symbol())
+		}
+		return
+	}
 }
 
 func (r *ArbitrageRound) syncFuturesPosition(trade types.Trade) {

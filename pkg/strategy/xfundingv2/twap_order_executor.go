@@ -21,6 +21,11 @@ type TWAPExecutor struct {
 	logger logrus.FieldLogger
 }
 
+type TWAPExecuteOrderOptions struct {
+	DeadlineExceeded bool
+	ReduceOnly       bool
+}
+
 func NewTWAPExecutor(
 	ctx context.Context,
 	exchange types.ExchangeOrderQueryService,
@@ -65,10 +70,12 @@ func (o *TWAPExecutor) Start() {
 
 // AddTrade adds a trade to the executor's internal trade list if it belongs to
 // an order managed by this executor.
-func (o *TWAPExecutor) AddTrade(trade types.Trade) {
-	if _, exists := o.syncState.Orders[trade.OrderID]; exists {
+func (o *TWAPExecutor) AddTrade(trade types.Trade) bool {
+	_, exists := o.syncState.Orders[trade.OrderID]
+	if exists {
 		o.syncState.Trades[trade.ID] = trade
 	}
+	return exists
 }
 
 func (o *TWAPExecutor) Stop() error {
@@ -124,14 +131,9 @@ func (o *TWAPExecutor) GetOrder(orderID uint64) (types.Order, bool) {
 	return o.executor.OrderStore().Get(orderID)
 }
 
-func (o *TWAPExecutor) OpenOrders() []types.Order {
-	var openOrders []types.Order
-	for _, order := range o.executor.ActiveMakerOrders().Orders() {
-		if _, found := o.syncState.Orders[order.OrderID]; found {
-			openOrders = append(openOrders, order)
-		}
-	}
-	return openOrders
+func (o *TWAPExecutor) CancelOpenOrders(ctx context.Context) error {
+	activeOrderBook := o.executor.ActiveMakerOrders()
+	return o.executor.GracefulCancelActiveOrderBook(ctx, activeOrderBook)
 }
 
 func (o *TWAPExecutor) AllOrders() []types.Order {
@@ -154,7 +156,7 @@ func (o *TWAPExecutor) AllTrades() []types.Trade {
 }
 
 // place order
-func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType, orderBook types.OrderBook, deadlineExceeded bool) (*types.Order, error) {
+func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType, orderBook types.OrderBook, options TWAPExecuteOrderOptions) (*types.Order, error) {
 	// find the better price and submit new order
 	quantity = o.syncState.Market.TruncateQuantity(quantity)
 	price, err := o.GetPrice(side, orderBook)
@@ -163,8 +165,8 @@ func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType
 		return nil, err
 	}
 	price = o.syncState.Market.TruncatePrice(price)
-	order := o.buildSubmitOrder(quantity, price, side, deadlineExceeded)
-	if o.syncState.Market.IsDustQuantity(order.Quantity, order.Price) {
+	order := o.buildSubmitOrder(quantity, price, side, options)
+	if order.Type != types.OrderTypeMarket && o.syncState.Market.IsDustQuantity(order.Quantity, order.Price) {
 		return nil, fmt.Errorf("order is of dust quantity: %s", quantity)
 	}
 
@@ -179,14 +181,15 @@ func (o *TWAPExecutor) PlaceOrder(quantity fixedpoint.Value, side types.SideType
 	return &createdOrders[0], nil
 }
 
-func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side types.SideType, deadlineExceeded bool) types.SubmitOrder {
-	if deadlineExceeded {
+func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side types.SideType, options TWAPExecuteOrderOptions) types.SubmitOrder {
+	if options.DeadlineExceeded {
 		return types.SubmitOrder{
-			Symbol:   o.syncState.Market.Symbol,
-			Market:   o.syncState.Market,
-			Side:     side,
-			Type:     types.OrderTypeMarket,
-			Quantity: quantity,
+			Symbol:     o.syncState.Market.Symbol,
+			Market:     o.syncState.Market,
+			Side:       side,
+			Type:       types.OrderTypeMarket,
+			Quantity:   quantity,
+			ReduceOnly: true,
 		}
 	}
 	orderType := types.OrderTypeLimitMaker
@@ -197,7 +200,7 @@ func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side t
 		timeInForce = types.TimeInForceIOC
 	}
 
-	return types.SubmitOrder{
+	orderForm := types.SubmitOrder{
 		Symbol:      o.syncState.Market.Symbol,
 		Market:      o.syncState.Market,
 		Side:        side,
@@ -205,7 +208,9 @@ func (o *TWAPExecutor) buildSubmitOrder(quantity, price fixedpoint.Value, side t
 		Quantity:    quantity,
 		Price:       price,
 		TimeInForce: timeInForce,
+		ReduceOnly:  options.ReduceOnly,
 	}
+	return orderForm
 }
 
 func (o *TWAPExecutor) GetPrice(side types.SideType, orderBook types.OrderBook) (price fixedpoint.Value, err error) {

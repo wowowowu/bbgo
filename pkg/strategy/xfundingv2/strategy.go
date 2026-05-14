@@ -15,6 +15,7 @@ import (
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/sirupsen/logrus"
+	"github.com/slack-go/slack"
 	"golang.org/x/time/rate"
 )
 
@@ -22,6 +23,10 @@ const ID = "xfundingv2"
 
 func init() {
 	bbgo.RegisterStrategy(ID, &Strategy{})
+}
+
+type CriticalErrorConfig struct {
+	MaxRemainingNotional fixedpoint.Value `json:"maxRemainingNotional"`
 }
 
 type Strategy struct {
@@ -54,8 +59,9 @@ type Strategy struct {
 	MarketSelectionConfig *MarketSelectionConfig      `json:"marketSelection,omitempty"`
 	MaxPositionExposure   map[string]fixedpoint.Value `json:"maxPositionExposure"`
 
-	CheckInterval       time.Duration `json:"checkInterval"`
-	ClosePositionOnExit bool          `json:"closePositionOnExit"`
+	CheckInterval       time.Duration       `json:"checkInterval"`
+	ClosePositionOnExit bool                `json:"closePositionOnExit"`
+	CriticalErrorConfig CriticalErrorConfig `json:"criticalErrorConfig"`
 
 	spotSession, futuresSession *bbgo.ExchangeSession
 	futuresService              FuturesService
@@ -73,6 +79,11 @@ type Strategy struct {
 	// pending rounds and active rounds
 	pendingRounds map[string]*PendingRound   `persistence:"pendingRounds"`
 	activeRounds  map[string]*ArbitrageRound `persistence:"activeRounds"`
+
+	// closed rounds that are waiting for cleanup
+	MaxClosedRetryCnt int                        `json:"maxClosedRetryCnt"`
+	closedRounds      map[string]*CloseRoundTask `persistence:"closedRounds"`
+
 	// the positions are shared across rounds and the executors of the same symbol.
 	spotPositions    map[string]*types.Position `persistence:"spotPositions,omitempty"`
 	futuresPositions map[string]*types.Position `persistence:"futuresPositions,omitempty"`
@@ -154,6 +165,7 @@ func (s *Strategy) Initialize() error {
 	if s.MaxPositionExposure == nil {
 		s.MaxPositionExposure = make(map[string]fixedpoint.Value)
 	}
+	s.MaxClosedRetryCnt = 3
 	return nil
 }
 
@@ -204,6 +216,9 @@ func (s *Strategy) CrossRun(
 	if s.pendingRounds == nil {
 		s.pendingRounds = make(map[string]*PendingRound)
 	}
+	if s.closedRounds == nil {
+		s.closedRounds = make(map[string]*CloseRoundTask)
+	}
 
 	s.spotSession = sessions[s.SpotSession]
 	s.futuresSession = sessions[s.FuturesSession]
@@ -231,6 +246,28 @@ func (s *Strategy) CrossRun(
 	}
 	if _, ok := s.futuresSession.Exchange.(types.ExchangeOrderQueryService); !ok {
 		return fmt.Errorf("futures session exchange does not support order query service: %s", s.futuresSession.ExchangeName)
+	}
+
+	// remaining open position check
+	risks, err := s.futuresService.QueryPositionRisk(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to query position risk from futures session exchange: %w", err)
+	}
+	risksMap := make(map[string]types.PositionRisk)
+	for _, risk := range risks {
+		risksMap[risk.Symbol] = risk
+	}
+	// if there is any open position, it should have a corresponding active round which is loaded via LoadState.
+	// Otherwise, it is a mismatch and should raise an error to stop the strategy from running.
+	var mismatchSymbols []string
+	for _, risk := range risks {
+		_, found := s.activeRounds[risk.Symbol]
+		if !risk.PositionAmount.IsZero() && !found {
+			mismatchSymbols = append(mismatchSymbols, risk.Symbol)
+		}
+	}
+	if len(mismatchSymbols) > 0 {
+		return fmt.Errorf("found open positions without active rounds: %v on %s", mismatchSymbols, s.futuresSession.Exchange.Name())
 	}
 
 	// initialize cost estimator
@@ -262,7 +299,6 @@ func (s *Strategy) CrossRun(
 	// NOTE: the executors should be created first before anything else to ensure the executors get updated first.
 	// The twap executors rely on the state of the general order executors to determine the filled quantity.
 	s.candidateSymbols = candidateSymbols
-	candidateSymbolsMap := make(map[string]struct{})
 	setupGeneralExecutorsForSymbol := func(symbol string) error {
 		spotMarket, found := s.spotSession.Market(symbol)
 		if !found {
@@ -304,6 +340,11 @@ func (s *Strategy) CrossRun(
 		)
 		spotExecutor.DisableNotify()
 		spotExecutor.Bind()
+		if openOrders, err := s.spotSession.Exchange.QueryOpenOrders(ctx, symbol); err != nil {
+			return fmt.Errorf("failed to query open orders for spot symbol %s: %w", symbol, err)
+		} else if len(openOrders) > 0 {
+			spotExecutor.ActiveMakerOrders().Add(openOrders...)
+		}
 		s.spotGeneralOrderExecutors[symbol] = spotExecutor
 		futuresExecutor := bbgo.NewGeneralOrderExecutor(
 			s.futuresSession,
@@ -312,13 +353,17 @@ func (s *Strategy) CrossRun(
 			s.InstanceID(),
 			futuresPosition,
 		)
+		if openOrders, err := s.futuresSession.Exchange.QueryOpenOrders(ctx, symbol); err != nil {
+			return fmt.Errorf("failed to query open orders for futures symbol %s: %w", symbol, err)
+		} else if len(openOrders) > 0 {
+			futuresExecutor.ActiveMakerOrders().Add(openOrders...)
+		}
 		futuresExecutor.DisableNotify()
 		futuresExecutor.Bind()
 		s.futuresGeneralOrderExecutors[symbol] = futuresExecutor
 		return nil
 	}
 	for _, symbol := range candidateSymbols {
-		candidateSymbolsMap[symbol] = struct{}{}
 		if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
 			return err
 		}
@@ -388,32 +433,52 @@ func (s *Strategy) CrossRun(
 	// runtime init done, load pending and active rounds
 	for symbol, pendingRound := range s.pendingRounds {
 		// setup order executors
-		if _, found := candidateSymbolsMap[symbol]; !found {
+		if _, found := s.spotGeneralOrderExecutors[symbol]; !found {
 			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
 				return fmt.Errorf("failed to setup order executors for pending round symbol %s: %w", symbol, err)
 			}
 		}
 		// setup stream books for the symbols
-		if _, found := candidateSymbolsMap[symbol]; !found {
+		if _, found := s.spotOrderBooks[symbol]; !found {
 			setupStreamBooksForSymbol(symbol)
 		}
-		if err := pendingRound.Initialize(ctx, s); err != nil {
+		if err := pendingRound.Round.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("failed to restore pending round (%s): %w", symbol, err)
 		}
 	}
 	for symbol, activeRound := range s.activeRounds {
 		// setup order executors
-		if _, found := candidateSymbolsMap[symbol]; !found {
+		if _, found := s.spotGeneralOrderExecutors[symbol]; !found {
 			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
 				return fmt.Errorf("failed to setup order executors for active round symbol %s: %w", symbol, err)
 			}
 		}
 		// setup stream books for the symbols
-		if _, found := candidateSymbolsMap[symbol]; !found {
+		if _, found := s.spotOrderBooks[symbol]; !found {
 			setupStreamBooksForSymbol(symbol)
 		}
 		if err := activeRound.Initialize(ctx, s); err != nil {
 			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
+		}
+	}
+	for symbol, closedRound := range s.closedRounds {
+		// setup order executors
+		if _, found := s.spotGeneralOrderExecutors[symbol]; !found {
+			if err := setupGeneralExecutorsForSymbol(symbol); err != nil {
+				return fmt.Errorf("failed to setup order executors for active round symbol %s: %w", symbol, err)
+			}
+		}
+		// setup stream books for the symbols
+		if _, found := s.spotOrderBooks[symbol]; !found {
+			setupStreamBooksForSymbol(symbol)
+		}
+		if err := closedRound.Round.Initialize(ctx, s); err != nil {
+			return fmt.Errorf("failed to restore active round (%s): %w", symbol, err)
+		}
+		// give the restored closed round one more chance to be processed.
+		if closedRound.RetryCnt >= s.MaxClosedRetryCnt {
+			closedRound.RetryCnt--
+			closedRound.Notified = false
 		}
 	}
 
@@ -436,7 +501,7 @@ func (s *Strategy) CrossRun(
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		for _, round := range s.activeRounds {
+		for _, round := range s.allRounds() {
 			if round.HasOrder(trade.OrderID) {
 				round.HandleSpotTrade(trade, trade.Time.Time())
 			}
@@ -446,7 +511,7 @@ func (s *Strategy) CrossRun(
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		for _, round := range s.activeRounds {
+		for _, round := range s.allRounds() {
 			if round.HasOrder(trade.OrderID) {
 				round.HandleFuturesTrade(trade, trade.Time.Time())
 			}
@@ -463,6 +528,20 @@ func (s *Strategy) CrossRun(
 	})
 
 	return nil
+}
+
+func (s *Strategy) allRounds() []*ArbitrageRound {
+	var rounds []*ArbitrageRound
+	for _, round := range s.activeRounds {
+		rounds = append(rounds, round)
+	}
+	for _, pendingRound := range s.pendingRounds {
+		rounds = append(rounds, pendingRound.Round)
+	}
+	for _, closedRound := range s.closedRounds {
+		rounds = append(rounds, closedRound.Round)
+	}
+	return rounds
 }
 
 func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
@@ -482,16 +561,43 @@ func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 		s.transitRoundState(ctx, round, tickTime)
 	}
 
-	// remove closed active rounds
+	// enque closed active rounds
 	for _, round := range s.activeRounds {
-		if round.State() == RoundClosed {
-			s.logger.Infof("removing closed round: %s", round)
-			delete(s.activeRounds, round.SpotSymbol())
-			// TODO: implement a dedicated worker to handle the post-round processing
-			// So that we can prevent blocking the main ticking loop too long when there are multiple rounds get closed.
-			s.handleClosedRound(ctx, round, tickTime)
+		if round.State() != RoundClosed {
+			continue
+		}
+		s.logger.Infof("move round to closed queue: %s", round)
+		// stop the round
+		round.Stop()
+		// remove from active round queue
+		delete(s.activeRounds, round.SpotSymbol())
+		// add to closed round queue for cleanup
+		s.closedRounds[round.SpotSymbol()] = &CloseRoundTask{
+			Round:    round,
+			RetryCnt: 0,
 		}
 	}
+
+	closeRoundCtx, cancelCloseRound := context.WithTimeout(ctx, 15*time.Second)
+	for _, closedRound := range s.closedRounds {
+		if closedRound.RetryCnt >= s.MaxClosedRetryCnt {
+			if !closedRound.Notified {
+				// send notification for rounds that failed to pass the cleanup process for 3 times.
+				// the symbol of the round will be blocked for opening new round until the issue is resolved.
+				closedRound.Notified = true
+				bbgo.Notify(closedRound)
+			}
+			continue
+		}
+
+		if err := s.handleClosedRound(closeRoundCtx, closedRound, tickTime); err != nil {
+			closedRound.RetryCnt++
+		} else {
+			s.logger.Infof("successfully handled closed round: %s", closedRound.Round)
+			delete(s.closedRounds, closedRound.Round.SpotSymbol())
+		}
+	}
+	cancelCloseRound()
 
 	// 2. check if new round can be opened or existing round needs to be adjusted
 	s.checkOpenNewRound(ctx, tickTime)
@@ -635,9 +741,7 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 			// no profitable candidate found, nothing to do
 			return
 		}
-		_, pending := s.pendingRounds[selectedCandidate.Symbol]
-		_, active := s.activeRounds[selectedCandidate.Symbol]
-		if pending || active {
+		if !s.canOpenRound(selectedCandidate.Symbol) {
 			// already has pending or active round for the symbol, skip
 			return
 		}
@@ -889,9 +993,56 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 	return breakEvenIntervals, nil
 }
 
-func (s *Strategy) handleClosedRound(ctx context.Context, round *ArbitrageRound, tickTime time.Time) {
-	// stop the round
-	round.Stop()
+type CloseRoundTask struct {
+	Round    *ArbitrageRound `json:"round"`
+	RetryCnt int             `json:"retry_cnt"`
+	Notified bool            `json:"notified"`
+}
+
+func (c *CloseRoundTask) SlackAttachment() slack.Attachment {
+	roundAttachment := c.Round.SlackAttachment()
+	return slack.Attachment{
+		Title:  fmt.Sprintf("Round Cleanup Task %s", c.Round.FuturesSymbol()),
+		Color:  roundAttachment.Color,
+		Fields: roundAttachment.Fields,
+	}
+}
+
+func (s *Strategy) handleClosedRound(ctx context.Context, task *CloseRoundTask, tickTime time.Time) error {
+	round := task.Round
+	futuresOrderbook := s.futuresOrderBooks[round.FuturesSymbol()].Copy()
+	futuresMidPrice := getMidPrice(futuresOrderbook)
+	// if the remaining quantity is too large, return an critical error and do not remove the round from active rounds, to prevent creating new round on the same symbol
+	remainingNotional := round.FuturesWorker().RemainingQuantity().Mul(futuresMidPrice)
+	if remainingNotional.Abs().Compare(s.CriticalErrorConfig.MaxRemainingNotional) >= 0 {
+		return fmt.Errorf(
+			"[handleClosedRound] remaining notional %s > %s: %s",
+			remainingNotional,
+			s.CriticalErrorConfig.MaxRemainingNotional,
+			round,
+		)
+	}
+
+	// clean up open orders if there is any
+	if err := round.SpotWorker().Executor().CancelOpenOrders(ctx); err != nil {
+		return fmt.Errorf(
+			"[handleClosedRound] failed to cancel open spot orders for %s: %w",
+			round.SpotSymbol(),
+			err,
+		)
+	}
+	if err := round.FuturesWorker().Executor().CancelOpenOrders(ctx); err != nil {
+		return fmt.Errorf(
+			"[handleClosedRound] failed to cancel open futures orders for %s: %w",
+			round.FuturesSymbol(),
+			err,
+		)
+	}
+
+	// close futures positions if there is any
+	if err := round.Cleanup(ctx, futuresOrderbook); err != nil {
+		return fmt.Errorf("[handleClosedRound] failed to close remaining positions for the futures: %w", err)
+	}
 
 	// transfer asset back to spot account
 	var asset string
@@ -906,47 +1057,32 @@ func (s *Strategy) handleClosedRound(ctx context.Context, round *ArbitrageRound,
 	account := s.futuresSession.GetAccount()
 	balance, ok := account.Balance(asset)
 	if !ok {
-		s.logger.Warnf("balance not found for asset %s when handling round exit: %s", asset, round)
+		return fmt.Errorf("[handleClosedRound] balance not found for asset %s when handling round exit: %s", asset, round)
 	} else if balance.Available.Sign() > 0 {
 		// transfer the remaining balance back to spot account if there is any
 		if err := s.futuresService.TransferFuturesAccountAsset(ctx, asset, balance.Available, types.TransferOut); err != nil {
-			s.logger.WithError(err).Errorf("failed to transfer %s during round exit: %s", asset, round)
+			return fmt.Errorf("[handleClosedRound] failed to transfer %s %s during round exit: %w", balance.Available, asset, err)
 		} else {
-			s.logger.Infof("transferred out %s during round exit: %s", asset, round)
+			s.logger.Infof("[handleClosedRound] transferred out %s %s success: %s", balance.Available, asset, round)
 		}
 	}
 
+	// PnL calculation and record keeping
 	if executor, ok := s.spotGeneralOrderExecutors[s.FeeSymbol]; ok {
 		feeAvgCost := executor.Position().AverageCost
 		round.SetAvgFeeCost(s.FeeSymbol, feeAvgCost)
 	}
-	// clean up open orders if there is any
-	var spotOpenOrders, futuresOpenOrders []types.Order
-	for _, order := range round.SpotWorker().Executor().OpenOrders() {
-		spotOpenOrders = append(spotOpenOrders, order)
+	if err := round.SyncFundingFeeRecords(ctx, tickTime); err != nil {
+		return fmt.Errorf("[handleClosedRound] failed to sync funding fee records for round %s: %w", round, err)
 	}
-	for _, order := range round.FuturesWorker().Executor().OpenOrders() {
-		futuresOpenOrders = append(futuresOpenOrders, order)
-	}
-	if len(spotOpenOrders) > 0 {
-		err := s.spotSession.Exchange.CancelOrders(ctx, spotOpenOrders...)
-		if err != nil {
-			s.logger.WithError(err).Errorf(
-				"[roundExitWorker] failed to cancel open spot orders: %s",
-				round.SpotSymbol(),
-			)
-		}
-	}
-	if len(futuresOpenOrders) > 0 {
-		err := s.futuresSession.Exchange.CancelOrders(ctx, futuresOpenOrders...)
-		if err != nil {
-			s.logger.WithError(err).Errorf(
-				"[roundExitWorker] failed to cancel open futures orders: %s",
-				round.FuturesSymbol(),
-			)
-		}
-	}
-	round.SyncFundingFeeRecords(ctx, tickTime)
-	bbgo.Notify(round.PnL(ctx, tickTime))
+	bbgo.Notify(round.PnL())
 	// TODO: insert closed round records into database
+	return nil
+}
+
+func (s *Strategy) canOpenRound(symbol string) bool {
+	_, pending := s.pendingRounds[symbol]
+	_, active := s.activeRounds[symbol]
+	_, closed := s.closedRounds[symbol]
+	return !pending && !active && !closed
 }

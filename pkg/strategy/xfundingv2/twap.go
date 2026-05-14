@@ -130,8 +130,8 @@ func (w *TWAPWorker) AveragePrice() fixedpoint.Value {
 }
 
 // AddTrade adds a trade to the worker if it belongs to an order managed by this worker.
-func (w *TWAPWorker) AddTrade(trade types.Trade) {
-	w.syncState.TWAPExecutor.AddTrade(trade)
+func (w *TWAPWorker) AddTrade(trade types.Trade) bool {
+	return w.syncState.TWAPExecutor.AddTrade(trade)
 }
 
 func (w *TWAPWorker) FilledPosition() fixedpoint.Value {
@@ -317,6 +317,11 @@ func (w *TWAPWorker) Tick(currentTime time.Time, orderBook types.OrderBook) erro
 
 	// check if deadline exceeded
 	deadlineExceeded := !currentTime.Before(w.syncState.EndTime)
+	closing := w.syncState.TargetPosition.IsZero()
+	orderOptions := TWAPExecuteOrderOptions{
+		DeadlineExceeded: deadlineExceeded,
+		ReduceOnly:       closing,
+	}
 	// if deadline exceeded, we want to place a final order for the remaining quantity
 	if deadlineExceeded {
 		if w.syncState.ActiveOrder != nil {
@@ -330,7 +335,7 @@ func (w *TWAPWorker) Tick(currentTime time.Time, orderBook types.OrderBook) erro
 			remaining.Abs(),
 			orderSide(remaining),
 			orderBook,
-			true,
+			orderOptions,
 		)
 		if err != nil || createdOrder == nil {
 			return fmt.Errorf("failed to place final order when deadline exceeded: %w", err)
@@ -343,7 +348,12 @@ func (w *TWAPWorker) Tick(currentTime time.Time, orderBook types.OrderBook) erro
 	// we don't have an active order, place a new one
 	if w.syncState.ActiveOrder == nil {
 		sliceQty := w.calculateSliceQuantity(currentTime, remaining, false)
-		createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(sliceQty, orderSide(remaining), orderBook, false)
+		createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(
+			sliceQty,
+			orderSide(remaining),
+			orderBook,
+			orderOptions,
+		)
 		if err != nil || createdOrder == nil {
 			return fmt.Errorf("failed to place order: %w", err)
 		}
@@ -369,7 +379,7 @@ func (w *TWAPWorker) Tick(currentTime time.Time, orderBook types.OrderBook) erro
 			w.syncState.ActiveOrder.GetRemainingQuantity(),
 			w.syncState.ActiveOrder.Side,
 			orderBook,
-			deadlineExceeded,
+			orderOptions,
 		)
 		if err != nil || createdOrder == nil {
 			return fmt.Errorf("failed to place replacement order: %w", err)
@@ -396,7 +406,12 @@ func (w *TWAPWorker) Tick(currentTime time.Time, orderBook types.OrderBook) erro
 	// currentTime is after current interval end, time to place the next slice order
 	// calculate slice quantity
 	sliceQty := w.calculateSliceQuantity(currentTime, remaining, deadlineExceeded)
-	createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(sliceQty, orderSide(remaining), orderBook, deadlineExceeded)
+	createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(
+		sliceQty,
+		orderSide(remaining),
+		orderBook,
+		orderOptions,
+	)
 	if err != nil || createdOrder == nil {
 		return fmt.Errorf("failed to place order for next slice: %w", err)
 	}

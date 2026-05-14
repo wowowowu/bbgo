@@ -16,10 +16,6 @@ type PendingRound struct {
 	LastRetryTime time.Time       `json:"lastRetryTime"`
 }
 
-func (r *PendingRound) Initialize(ctx context.Context, s *Strategy) error {
-	return r.Round.Initialize(ctx, s)
-}
-
 func (s *Strategy) processPendingRounds(ctx context.Context, currentTime time.Time) {
 	var pendingRounds []*PendingRound
 	for _, pendingRound := range s.pendingRounds {
