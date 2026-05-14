@@ -33,6 +33,7 @@ type AsyncTimeRangedBatchQuery struct {
 
 	// JumpIfEmpty jump the startTime + duration when the result is empty
 	JumpIfEmpty time.Duration
+	MaxRetries  uint64
 
 	DisableBackoff bool
 }
@@ -78,10 +79,14 @@ func (q *AsyncTimeRangedBatchQuery) Query(ctx context.Context, ch interface{}, s
 					return
 				}
 			} else {
+				max := q.MaxRetries
+				if max == 0 {
+					max = 32
+				}
 				err := backoff.Retry(doQuery, backoff.WithContext(
 					backoff.WithMaxRetries(
 						backoff.NewExponentialBackOff(),
-						32),
+						max),
 					ctx))
 				if err != nil {
 					errC <- err
