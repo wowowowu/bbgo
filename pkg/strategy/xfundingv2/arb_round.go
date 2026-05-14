@@ -350,11 +350,11 @@ func (r *ArbitrageRound) totalFundingIncome() fixedpoint.Value {
 	return totalFunding
 }
 
-func (r *ArbitrageRound) SyncFundingFeeRecords(ctx context.Context, currentTime time.Time) {
+func (r *ArbitrageRound) SyncFundingFeeRecords(ctx context.Context, currentTime time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.syncFundingFeeRecords(ctx, currentTime)
+	return r.syncFundingFeeRecords(ctx, currentTime)
 }
 
 func (r *ArbitrageRound) Orders() map[string][]types.Order {
@@ -395,9 +395,9 @@ func (r *ArbitrageRound) hasOrder(orderID uint64) bool {
 	return spotExists || futuresExists
 }
 
-func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime time.Time) {
+func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime time.Time) error {
 	if r.syncState.StartTime.IsZero() || r.syncState.StartTime.After(currentTime) {
-		return
+		return nil
 	}
 
 	q := batch.BinanceFuturesIncomeBatchQuery{
@@ -408,11 +408,11 @@ func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 
 		case income, ok := <-dataC:
 			if !ok {
-				return
+				return nil
 			}
 			switch income.IncomeType {
 			case binanceapi.FuturesIncomeFundingFee:
@@ -426,11 +426,11 @@ func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime 
 			}
 		case err, ok := <-errC:
 			if !ok {
-				return
+				return nil
 			}
 
 			r.logger.WithError(err).Errorf("unable to query futures income history")
-			return
+			return err
 
 		}
 	}

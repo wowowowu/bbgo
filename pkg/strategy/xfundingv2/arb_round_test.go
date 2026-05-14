@@ -2,6 +2,8 @@ package xfundingv2
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,15 +19,34 @@ import (
 
 // mockFuturesService implements FuturesService for testing
 type mockFuturesService struct {
+	mu sync.Mutex
+
 	incomeHistory []binanceapi.FuturesIncome
+	incomeErr     error
 	transferErr   error
+}
+
+func (m *mockFuturesService) ResetIncomeError() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.incomeErr = nil
+}
+
+func (m *mockFuturesService) SetIncomeError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.incomeErr = err
 }
 
 func (m *mockFuturesService) QueryFuturesIncomeHistory(
 	ctx context.Context, symbol string, incomeType binanceapi.FuturesIncomeType,
 	startTime, endTime *time.Time,
 ) ([]binanceapi.FuturesIncome, error) {
-	return m.incomeHistory, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.incomeHistory, m.incomeErr
 }
 
 func (m *mockFuturesService) TransferFuturesAccountAsset(
@@ -153,7 +174,8 @@ func TestArbitrageRound_TotalFundingIncome(t *testing.T) {
 	t.Run("returns zero when startTime is zero", func(t *testing.T) {
 		ctx := context.Background()
 		currentTime := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-		round.SyncFundingFeeRecords(ctx, currentTime)
+		err := round.SyncFundingFeeRecords(ctx, currentTime)
+		assert.NoError(t, err)
 		result := round.TotalFundingIncome()
 		assert.Equal(t, fixedpoint.Zero, result)
 	})
@@ -183,7 +205,8 @@ func TestArbitrageRound_TotalFundingIncome(t *testing.T) {
 
 		ctx := context.Background()
 		currentTime := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-		round.SyncFundingFeeRecords(ctx, currentTime)
+		err := round.SyncFundingFeeRecords(ctx, currentTime)
+		assert.NoError(t, err)
 		result := round.TotalFundingIncome()
 
 		expected := Number(0.005).Add(Number(0.003))
@@ -194,7 +217,8 @@ func TestArbitrageRound_TotalFundingIncome(t *testing.T) {
 		// Call again with same income history - should not double-count
 		ctx := context.Background()
 		currentTime := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-		round.SyncFundingFeeRecords(ctx, currentTime)
+		err := round.SyncFundingFeeRecords(ctx, currentTime)
+		assert.NoError(t, err)
 		result := round.TotalFundingIncome()
 
 		expected := Number(0.005).Add(Number(0.003))
@@ -214,10 +238,23 @@ func TestArbitrageRound_TotalFundingIncome(t *testing.T) {
 
 		ctx := context.Background()
 		currentTime := time.Date(2024, 1, 2, 8, 0, 0, 0, time.UTC)
-		round.SyncFundingFeeRecords(ctx, currentTime)
+		err := round.SyncFundingFeeRecords(ctx, currentTime)
+		assert.NoError(t, err)
 		result := round.TotalFundingIncome()
 
 		expected := Number(0.005).Add(Number(0.003)).Add(Number(0.002))
 		assert.Equal(t, expected, result)
+	})
+
+	t.Run("returns error when income query fails", func(t *testing.T) {
+		queryErr := errors.New("income history query failed")
+		mockService.SetIncomeError(queryErr)
+		defer mockService.ResetIncomeError()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		currentTime := time.Date(2024, 1, 2, 8, 0, 0, 0, time.UTC)
+		err := round.SyncFundingFeeRecords(ctx, currentTime)
+		assert.Error(t, err)
 	})
 }
