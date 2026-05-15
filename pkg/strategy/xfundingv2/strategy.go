@@ -18,7 +18,6 @@ import (
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
-	"github.com/slack-go/slack"
 	"golang.org/x/time/rate"
 )
 
@@ -1102,15 +1101,6 @@ type CloseRoundTask struct {
 	RetryCnt      int             `json:"retry_cnt"`
 	LastTriedTime time.Time       `json:"last_tried_time"`
 	Notified      bool            `json:"notified"`
-}
-
-func (c *CloseRoundTask) SlackAttachment() slack.Attachment {
-	roundAttachment := c.Round.SlackAttachment()
-	return slack.Attachment{
-		Title:  fmt.Sprintf("Round Cleanup Task %s", c.Round.FuturesSymbol()),
-		Color:  roundAttachment.Color,
-		Fields: roundAttachment.Fields,
-	}
 }
 
 func (s *Strategy) handleClosedRound(ctx context.Context, task *CloseRoundTask, tickTime time.Time) error {
