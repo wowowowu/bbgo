@@ -3,6 +3,7 @@ package xfundingv2
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/c9s/bbgo/pkg/exchange/binance/binanceapi"
 	"github.com/c9s/bbgo/pkg/exchange/retry"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/slack/slackalert"
 	"github.com/c9s/bbgo/pkg/types"
 )
 
@@ -53,7 +55,8 @@ type ArbitrageRound struct {
 
 	retryTransferTickC chan time.Time
 
-	logger logrus.FieldLogger
+	logger     logrus.FieldLogger
+	slackAlert slackalert.SlackAlert
 }
 
 func NewArbitrageRound(
@@ -245,6 +248,10 @@ func (r *ArbitrageRound) String() string {
 	)
 }
 
+func (r *ArbitrageRound) SetSlackAlert(alert slackalert.SlackAlert) {
+	r.slackAlert = alert
+}
+
 func (r *ArbitrageRound) SlackAttachment() slack.Attachment {
 	title := fmt.Sprintf("Arbitrage Round %s (%s)", r.SpotSymbol(), r.syncState.State)
 	fields := []slack.AttachmentField{
@@ -305,9 +312,13 @@ func (r *ArbitrageRound) SlackAttachment() slack.Attachment {
 			Value: r.syncState.FundingIntervalEnd.Format(time.RFC3339),
 			Short: true,
 		})
-
+	text := "Arbitrage Round Details"
+	if len(r.slackAlert.Mentions) > 0 {
+		text += "cc " + strings.Join(r.slackAlert.Mentions, " ")
+	}
 	return slack.Attachment{
 		Title:  title,
+		Text:   text,
 		Color:  r.stateColor(),
 		Fields: fields,
 	}
@@ -429,7 +440,6 @@ func (r *ArbitrageRound) syncFundingFeeRecords(ctx context.Context, currentTime 
 				return nil
 			}
 
-			r.logger.WithError(err).Errorf("unable to query futures income history")
 			return err
 
 		}
@@ -478,7 +488,7 @@ func (r *ArbitrageRound) retryTransferWorker(ctx context.Context, tickC <-chan t
 			}
 			// retry failed transfers if any
 			r.mu.Lock()
-			for tradeID, transfer := range r.syncState.RetryTransfers {
+			for _, transfer := range r.syncState.RetryTransfers {
 				if r.syncState.RetryDuration == 0 {
 					// default retry duration is 10 minutes
 					r.syncState.RetryDuration = 10 * time.Minute
@@ -486,7 +496,7 @@ func (r *ArbitrageRound) retryTransferWorker(ctx context.Context, tickC <-chan t
 				if currentTime.Sub(transfer.LastTried) < r.syncState.RetryDuration {
 					continue
 				}
-				r.logger.Infof("retry transfer (trade: %d): %s %s", tradeID, transfer.Trade.Quantity.String(), r.syncState.Asset)
+				r.logger.Infof("retry transfer (last tried: %s): %s", transfer.LastTried.Format(time.RFC3339), transfer.Trade)
 				r.handleSpotTrade(transfer.Trade, currentTime)
 			}
 			r.mu.Unlock()
@@ -524,15 +534,13 @@ func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Tim
 	if err := r.futuresService.TransferFuturesAccountAsset(
 		timedCtx, r.syncState.Asset, trade.Quantity, types.TransferIn,
 	); err != nil {
-		r.logger.WithError(err).Errorf("failed to transfer %s %s from futures to spot",
-			trade.Quantity, r.syncState.Asset)
 		if _, found := r.syncState.RetryTransfers[trade.ID]; !found {
-			bbgo.Notify(
-				fmt.Errorf("transfer failed (%s %s), retrying: %w",
-					trade.Quantity.String(),
-					r.syncState.Asset,
-					err,
-				),
+			bbgo.Notify("🚨 Round spot transfer %s %s failed (%s), retrying: %s",
+				trade.Quantity.String(),
+				r.syncState.Asset,
+				currentTime.Format(time.RFC3339),
+				err.Error(),
+				trade,
 			)
 		}
 		r.syncState.RetryTransfers[trade.ID] = transferRetry{
@@ -543,6 +551,11 @@ func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Tim
 	}
 	// transfer succeeded, remove from retry list if exists
 	delete(r.syncState.RetryTransfers, trade.ID)
+	bbgo.Notify("➡️ Transfered %s %s from spot to futures",
+		trade.Quantity.String(),
+		r.syncState.Asset,
+		trade,
+	)
 }
 
 func (r *ArbitrageRound) HandleFuturesTrade(trade types.Trade, currentTime time.Time) {
@@ -710,19 +723,24 @@ func (r *ArbitrageRound) Tick(currentTime time.Time, spotOrderBook types.OrderBo
 
 		if spotIsDust && futuresIsDust {
 			r.syncState.State = RoundClosed
-			r.logger.Infof("positions closed, arbitrage round completed: %s", r.spotWorker.Symbol())
+			r.logger.Infof("arbitrage round transit to closed state at %s: %s", currentTime.Format(time.RFC3339), r.spotWorker.Symbol())
 		}
 		return
 	}
 }
 
 func (r *ArbitrageRound) syncFuturesPosition(trade types.Trade) {
+	if r.syncState.State != RoundOpening {
+		// only sync futures position when the round is opening
+		return
+	}
+	// the target spot position can be either positive or negative
 	futureTargetPosition := r.futuresWorker.TargetPosition()
 	if r.spotWorker.TargetPosition().Sign() > 0 {
 		futureTargetPosition = futureTargetPosition.Sub(trade.Quantity)
 	} else {
 		futureTargetPosition = futureTargetPosition.Add(trade.Quantity)
 	}
-	r.logger.Infof("syncing futures position to %s", futureTargetPosition)
+	r.logger.Infof("syncing futures position to %s: %s", futureTargetPosition, trade)
 	r.futuresWorker.SetTargetPosition(futureTargetPosition)
 }
