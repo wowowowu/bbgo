@@ -86,8 +86,9 @@ type ArbitrageRoundSyncState struct {
 	FeeSymbol             string           `json:"feeSymbol"`
 	AvgFeeCost            fixedpoint.Value `json:"avgFeeCost"`
 
-	RetryDuration  time.Duration            `json:"retryDuration"`
-	RetryTransfers map[uint64]transferRetry `json:"retryTransfers"`
+	RetryDuration    time.Duration             `json:"retryDuration"`
+	RetryTransfers   map[uint64]*transferRetry `json:"retryTransfers"`
+	SyncedSpotTrades map[uint64]struct{}       `json:"syncedSpotTrades"`
 
 	State RoundState `json:"state"`
 

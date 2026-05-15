@@ -103,7 +103,7 @@ func TestTWAPWorker_FillingOrders(t *testing.T) {
 			NumOfTicks:    1,
 		}
 
-		worker, mockExchange, _, generalExecutor := newTestTWAPWorker(t, ctrl, config)
+		worker, mockExchange, mockOrderQuery, generalExecutor := newTestTWAPWorker(t, ctrl, config)
 
 		// Target position: buy 5 BTC total
 		targetPosition := Number(5.0)
@@ -136,6 +136,20 @@ func TestTWAPWorker_FillingOrders(t *testing.T) {
 					Status: types.OrderStatusNew,
 				}, nil
 			}).AnyTimes()
+
+		mockExchange.EXPECT().
+			CancelOrders(gomock.Any(), gomock.Any()).
+			Return(nil).AnyTimes()
+
+		mockOrderQuery.EXPECT().
+			QueryOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, q types.OrderQuery) (*types.Order, error) {
+				return &types.Order{OrderID: 1, Status: types.OrderStatusCanceled}, nil
+			}).AnyTimes()
+
+		mockOrderQuery.EXPECT().
+			QueryOrderTrades(gomock.Any(), gomock.Any()).
+			Return([]types.Trade{}, nil).AnyTimes()
 
 		// Simulate 5 slices with full fills
 		// Expected slice quantities for buying 5 BTC in 5 slices:
@@ -200,7 +214,7 @@ func TestTWAPWorker_FillingOrders(t *testing.T) {
 			NumOfTicks:    1,
 		}
 
-		worker, mockExchange, _, generalExecutor := newTestTWAPWorker(t, ctrl, config)
+		worker, mockExchange, mockOrderQuery, generalExecutor := newTestTWAPWorker(t, ctrl, config)
 
 		// Target position: buy 3 BTC total
 		targetPosition := Number(3.0)
@@ -232,6 +246,20 @@ func TestTWAPWorker_FillingOrders(t *testing.T) {
 					Status: types.OrderStatusNew,
 				}, nil
 			}).AnyTimes()
+
+		mockExchange.EXPECT().
+			CancelOrders(gomock.Any(), gomock.Any()).
+			Return(nil).AnyTimes()
+
+		mockOrderQuery.EXPECT().
+			QueryOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, q types.OrderQuery) (*types.Order, error) {
+				return &types.Order{OrderID: 1, Status: types.OrderStatusCanceled}, nil
+			}).AnyTimes()
+
+		mockOrderQuery.EXPECT().
+			QueryOrderTrades(gomock.Any(), gomock.Any()).
+			Return([]types.Trade{}, nil).AnyTimes()
 
 		// Slice 1: Place order for ~1 BTC (3/3), only fill 0.5 BTC
 		err = worker.Tick(startTime, orderBook)

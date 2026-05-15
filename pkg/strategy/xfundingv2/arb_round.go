@@ -90,7 +90,8 @@ func NewArbitrageRound(
 			FuturesExchangeName: futuresExchangeName,
 			Asset:               asset,
 			State:               RoundPending,
-			RetryTransfers:      make(map[uint64]transferRetry),
+			RetryTransfers:      make(map[uint64]*transferRetry),
+			SyncedSpotTrades:    make(map[uint64]struct{}),
 		},
 
 		spotWorker:         spotTwap,
@@ -252,74 +253,86 @@ func (r *ArbitrageRound) SetSlackAlert(alert slackalert.SlackAlert) {
 	r.slackAlert = alert
 }
 
-func (r *ArbitrageRound) SlackAttachment() slack.Attachment {
-	title := fmt.Sprintf("Arbitrage Round %s (%s)", r.SpotSymbol(), r.syncState.State)
+func (r *ArbitrageRound) NewNotification(isCritical bool) *roundNotification {
+	return &roundNotification{
+		ArbitrageRound: r,
+		IsCritical:     isCritical,
+	}
+}
+
+type roundNotification struct {
+	*ArbitrageRound
+	IsCritical bool
+}
+
+func (n *roundNotification) SlackAttachment() slack.Attachment {
+	title := fmt.Sprintf("Arbitrage Round %s (%s)", n.SpotSymbol(), n.syncState.State)
 	fields := []slack.AttachmentField{
 		{
 			Title: "Target Spot Position",
-			Value: r.syncState.TriggeredSpotTargetPosition.String(),
+			Value: n.syncState.TriggeredSpotTargetPosition.String(),
 			Short: true,
 		},
 		{
 			Title: "Funding Interval in Hours",
-			Value: fmt.Sprintf("%d", r.syncState.FundingIntervalHours),
+			Value: fmt.Sprintf("%d", n.syncState.FundingIntervalHours),
 			Short: true,
 		},
 		{
 			Title: "Triggered Funding Rate",
-			Value: r.syncState.TriggeredFundingRate.Percentage(),
+			Value: n.syncState.TriggeredFundingRate.Percentage(),
 			Short: true,
 		},
 		{
 			Title: "Annualized Funding Rate",
-			Value: r.AnnualizedRate().Percentage(),
+			Value: n.AnnualizedRate().Percentage(),
 			Short: true,
 		},
 	}
-	if r.State() == RoundClosing {
+	if n.State() == RoundClosing {
 		fields = append(fields,
 			slack.AttachmentField{
 				Title: "Closing Time",
-				Value: r.syncState.ClosingTime.Format(time.RFC3339),
+				Value: n.syncState.ClosingTime.Format(time.RFC3339),
 				Short: true,
 			},
 			slack.AttachmentField{
 				Title: "Expected Close Time",
-				Value: r.syncState.ClosingTime.Add(r.syncState.ClosingDuration).Format(time.RFC3339),
+				Value: n.syncState.ClosingTime.Add(n.syncState.ClosingDuration).Format(time.RFC3339),
 				Short: true,
 			})
-	} else if r.HasStarted() {
+	} else if n.HasStarted() {
 		fields = append(fields,
 			slack.AttachmentField{
 				Title: "Start Time",
-				Value: r.syncState.StartTime.Format(time.RFC3339),
+				Value: n.syncState.StartTime.Format(time.RFC3339),
 				Short: true,
 			},
 			slack.AttachmentField{
 				Title: "Min Holding Intervals",
-				Value: fmt.Sprintf("%d", r.syncState.MinHoldingIntervals),
+				Value: fmt.Sprintf("%d", n.syncState.MinHoldingIntervals),
 				Short: true,
 			})
 	}
 	fields = append(fields,
 		slack.AttachmentField{
 			Title: "Funding Interval Start",
-			Value: r.syncState.FundingIntervalStart.Format(time.RFC3339),
+			Value: n.syncState.FundingIntervalStart.Format(time.RFC3339),
 			Short: true,
 		},
 		slack.AttachmentField{
 			Title: "Funding Interval End",
-			Value: r.syncState.FundingIntervalEnd.Format(time.RFC3339),
+			Value: n.syncState.FundingIntervalEnd.Format(time.RFC3339),
 			Short: true,
 		})
 	text := "Arbitrage Round Details"
-	if len(r.slackAlert.Mentions) > 0 {
-		text += "cc " + strings.Join(r.slackAlert.Mentions, " ")
+	if n.IsCritical && len(n.slackAlert.Mentions) > 0 {
+		text += "cc " + strings.Join(n.slackAlert.Mentions, " ")
 	}
 	return slack.Attachment{
 		Title:  title,
 		Text:   text,
-		Color:  r.stateColor(),
+		Color:  n.stateColor(),
 		Fields: fields,
 	}
 }
@@ -478,6 +491,8 @@ func (r *ArbitrageRound) Stop() {
 }
 
 func (r *ArbitrageRound) retryTransferWorker(ctx context.Context, tickC <-chan time.Time) {
+	defer r.logger.Infof("retry transfer worker stopped: %s", r.SpotSymbol())
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -486,21 +501,30 @@ func (r *ArbitrageRound) retryTransferWorker(ctx context.Context, tickC <-chan t
 			if !ok {
 				return
 			}
-			// retry failed transfers if any
-			r.mu.Lock()
-			for _, transfer := range r.syncState.RetryTransfers {
-				if r.syncState.RetryDuration == 0 {
-					// default retry duration is 10 minutes
-					r.syncState.RetryDuration = 10 * time.Minute
-				}
-				if currentTime.Sub(transfer.LastTried) < r.syncState.RetryDuration {
-					continue
-				}
-				r.logger.Infof("retry transfer (last tried: %s): %s", transfer.LastTried.Format(time.RFC3339), transfer.Trade)
-				r.handleSpotTrade(transfer.Trade, currentTime)
-			}
-			r.mu.Unlock()
+			r.doRetryTransfers(currentTime)
 		}
+	}
+}
+
+func (r *ArbitrageRound) doRetryTransfers(currentTime time.Time) {
+	// retry failed transfers if any
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.syncState.State != RoundOpening {
+		return
+	}
+
+	for _, transfer := range r.syncState.RetryTransfers {
+		if r.syncState.RetryDuration == 0 {
+			// default retry duration is 10 minutes
+			r.syncState.RetryDuration = 10 * time.Minute
+		}
+		if currentTime.Sub(transfer.LastTried) < r.syncState.RetryDuration {
+			continue
+		}
+		r.logger.Infof("retry transfer (last tried: %s): %s", transfer.LastTried.Format(time.RFC3339), transfer.Trade)
+		r.handleSpotTrade(transfer.Trade, currentTime)
 	}
 }
 
@@ -522,7 +546,11 @@ func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Tim
 	}
 	r.logger.Infof("handling spot trade: %s", trade)
 	// no matter the transfer succeeds or not, we should update the futures position so that we can stay in delta-neutral
-	r.syncFuturesPosition(trade)
+	if _, found := r.syncState.SyncedSpotTrades[trade.ID]; !found {
+		// the trade is not synced to futures yet
+		r.syncFuturesPosition(trade)
+	}
+	r.syncState.SyncedSpotTrades[trade.ID] = struct{}{}
 
 	// try to transfer asset from spot to futures as collateral.
 	// if transfer fails, retry in the next tick until it succeeds
@@ -534,7 +562,7 @@ func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Tim
 	if err := r.futuresService.TransferFuturesAccountAsset(
 		timedCtx, r.syncState.Asset, trade.Quantity, types.TransferIn,
 	); err != nil {
-		if _, found := r.syncState.RetryTransfers[trade.ID]; !found {
+		if transfer, found := r.syncState.RetryTransfers[trade.ID]; !found {
 			bbgo.Notify("🚨 Round spot transfer %s %s failed (%s), retrying: %s",
 				trade.Quantity.String(),
 				r.syncState.Asset,
@@ -542,10 +570,12 @@ func (r *ArbitrageRound) handleSpotTrade(trade types.Trade, currentTime time.Tim
 				err.Error(),
 				trade,
 			)
-		}
-		r.syncState.RetryTransfers[trade.ID] = transferRetry{
-			Trade:     trade,
-			LastTried: currentTime,
+			r.syncState.RetryTransfers[trade.ID] = &transferRetry{
+				Trade:     trade,
+				LastTried: currentTime,
+			}
+		} else {
+			transfer.LastTried = currentTime
 		}
 		return
 	}

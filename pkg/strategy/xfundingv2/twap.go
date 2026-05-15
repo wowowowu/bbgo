@@ -404,6 +404,12 @@ func (w *TWAPWorker) Tick(currentTime time.Time, orderBook types.OrderBook) erro
 	}
 
 	// currentTime is after current interval end, time to place the next slice order
+	// cancel the current active order first
+	if err := w.syncState.TWAPExecutor.CancelOrder(w.ctx, *w.syncState.ActiveOrder); err != nil {
+		return fmt.Errorf("[TWAP tick] failed to cancel active order for next slice: %w", err)
+	}
+	w.syncAndResetActiveOrder()
+
 	// calculate slice quantity
 	sliceQty := w.calculateSliceQuantity(currentTime, remaining, deadlineExceeded)
 	createdOrder, err := w.syncState.TWAPExecutor.PlaceOrder(

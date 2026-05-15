@@ -47,7 +47,7 @@ func TestArbitrageRound_MarshalUnmarshalJSON(t *testing.T) {
 				AvgFeeCost:            fixedpoint.NewFromFloat(600.0),
 
 				RetryDuration: 5 * time.Minute,
-				RetryTransfers: map[uint64]transferRetry{
+				RetryTransfers: map[uint64]*transferRetry{
 					1: {
 						Trade: types.Trade{
 							ID:       1,
