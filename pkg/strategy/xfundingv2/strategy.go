@@ -50,7 +50,9 @@ type Strategy struct {
 	TransitRoundInterval types.Duration `json:"transitRoundInterval"`
 
 	// TickSymbol is the symbol used for ticking the strategy, default to the first candidate symbol
-	TickSymbol    string `json:"tickSymbol"`
+	TickSymbol   string         `json:"tickSymbol"`
+	TickInterval types.Interval `json:"tickInterval"`
+
 	FeeSymbol     string `json:"feeSymbol"`
 	QuoteCurrency string `json:"quoteCurrency"`
 
@@ -122,6 +124,9 @@ func (s *Strategy) Defaults() error {
 
 	if s.TickSymbol == "" {
 		s.TickSymbol = s.CandidateSymbols[0]
+	}
+	if s.TickInterval.Duration() == 0 {
+		s.TickInterval = types.Interval1m
 	}
 	if s.OpenPositionInterval.Duration() == 0 {
 		s.OpenPositionInterval = types.Duration(time.Minute * 30)
@@ -196,15 +201,8 @@ func (s *Strategy) CrossSubscribe(sessions map[string]*bbgo.ExchangeSession) {
 		s.logger.Warnf("spot session %s not found, skip subscription", s.SpotSession)
 		return
 	}
-	futuresSession, ok := sessions[s.FuturesSession]
-	if !ok {
-		s.logger.Warnf("futures session %s not found, skip subscription", s.FuturesSession)
-		return
-	}
-
-	for _, sess := range []*bbgo.ExchangeSession{spotSession, futuresSession} {
-		sess.Subscribe(types.KLineChannel, s.TickSymbol, types.SubscribeOptions{Interval: types.Interval1m})
-	}
+	// subscribe kline events for ticking the strategy
+	spotSession.Subscribe(types.KLineChannel, s.TickSymbol, types.SubscribeOptions{Interval: s.TickInterval})
 }
 
 func (s *Strategy) CrossRun(
@@ -495,11 +493,9 @@ func (s *Strategy) CrossRun(
 	}
 
 	// setup callbacks
-	for _, sess := range []*bbgo.ExchangeSession{s.spotSession, s.futuresSession} {
-		sess.MarketDataStream.OnKLineClosed(types.KLineWith(s.TickSymbol, types.Interval1m, func(kline types.KLine) {
-			s.tick(ctx, kline.EndTime.Time())
-		}))
-	}
+	s.spotSession.MarketDataStream.OnKLineClosed(types.KLineWith(s.TickSymbol, s.TickInterval, func(kline types.KLine) {
+		s.tick(ctx, kline.EndTime.Time())
+	}))
 
 	s.spotSession.UserDataStream.OnTradeUpdate(func(trade types.Trade) {
 		// lock the strategy to ensure all the updates to the active rounds are seen
