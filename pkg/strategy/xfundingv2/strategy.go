@@ -84,11 +84,19 @@ type Strategy struct {
 	coinmarketcapClient *coinmarketcap.DataSource
 
 	// persistence states
-	// pending rounds and active rounds
-	pendingRounds map[string]*PendingRound   `persistence:"pendingRounds"`
-	activeRounds  map[string]*ArbitrageRound `persistence:"activeRounds"`
+	// pendingRounds are the rounds that are waiting for the preparation work to be done
+	// before entering the active round list, such as fee asset preparation, transfer, etc.
+	pendingRounds map[string]*PendingRound `persistence:"pendingRounds"`
+
+	// activeRounds are the rounds that are actively trading or holding positions.
+	// rounds in the active list should be at the state of either RoundOpening, RoundReady or RoundClosing.
+	activeRounds map[string]*ArbitrageRound `persistence:"activeRounds"`
 
 	// closed rounds that are waiting for cleanup
+	// the cleanup process is to
+	// 1. ensure that the positions will restore to zero
+	// 2. all open orders are canceled.
+	// 3. collaterals are transferred back to the spot account.
 	MaxClosedRetryCnt int                        `json:"maxClosedRetryCnt"`
 	closedRoundTasks  map[string]*CloseRoundTask `persistence:"closedRounds"`
 
