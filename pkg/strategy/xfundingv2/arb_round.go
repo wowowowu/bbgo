@@ -501,25 +501,30 @@ func (r *ArbitrageRound) retryTransferWorker(ctx context.Context, tickC <-chan t
 			if !ok {
 				return
 			}
-			// retry failed transfers if any
-			r.mu.Lock()
-			if r.syncState.State != RoundOpening {
-				r.mu.Unlock()
-				continue
-			}
-			for _, transfer := range r.syncState.RetryTransfers {
-				if r.syncState.RetryDuration == 0 {
-					// default retry duration is 10 minutes
-					r.syncState.RetryDuration = 10 * time.Minute
-				}
-				if currentTime.Sub(transfer.LastTried) < r.syncState.RetryDuration {
-					continue
-				}
-				r.logger.Infof("retry transfer (last tried: %s): %s", transfer.LastTried.Format(time.RFC3339), transfer.Trade)
-				r.handleSpotTrade(transfer.Trade, currentTime)
-			}
-			r.mu.Unlock()
+			r.doRetryTransfers(currentTime)
 		}
+	}
+}
+
+func (r *ArbitrageRound) doRetryTransfers(currentTime time.Time) {
+	// retry failed transfers if any
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.syncState.State != RoundOpening {
+		return
+	}
+
+	for _, transfer := range r.syncState.RetryTransfers {
+		if r.syncState.RetryDuration == 0 {
+			// default retry duration is 10 minutes
+			r.syncState.RetryDuration = 10 * time.Minute
+		}
+		if currentTime.Sub(transfer.LastTried) < r.syncState.RetryDuration {
+			continue
+		}
+		r.logger.Infof("retry transfer (last tried: %s): %s", transfer.LastTried.Format(time.RFC3339), transfer.Trade)
+		r.handleSpotTrade(transfer.Trade, currentTime)
 	}
 }
 
