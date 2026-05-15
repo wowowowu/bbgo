@@ -282,7 +282,7 @@ func TestSelectMostProfitableMarket(t *testing.T) {
 		s.MarketSelectionConfig.FuturesDirection = types.PositionShort
 		s.MarketSelectionConfig.TradeBalanceRatio = Number("1.0")
 		s.MaxPositionExposure = map[string]fixedpoint.Value{
-			"ETHUSDT": Number("0.5"),
+			"ETH": Number("0.5"),
 		}
 
 		markets := types.MarketMap{"ETHUSDT": ethMarket}
@@ -324,7 +324,7 @@ func TestSelectMostProfitableMarket(t *testing.T) {
 		s.MarketSelectionConfig.FuturesDirection = types.PositionLong
 		s.MarketSelectionConfig.TradeBalanceRatio = Number("1.0")
 		s.MaxPositionExposure = map[string]fixedpoint.Value{
-			"ETHUSDT": Number("0.5"),
+			"ETH": Number("0.5"),
 		}
 
 		markets := types.MarketMap{"ETHUSDT": ethMarket}
