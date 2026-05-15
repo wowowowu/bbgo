@@ -34,14 +34,12 @@ type MarketSelectionConfig struct {
 	// recommended to default to 5%
 	MinAnnualizedRate fixedpoint.Value `json:"minAnnualizedRate"`
 
-	// Minimum 24h quote volume
-	MinVolume24h fixedpoint.Value `json:"minVolume24h"`
-
 	MinCollateralRate fixedpoint.Value `json:"minCollateralRate"`
 
 	// Depth
-	DepthRatio                  fixedpoint.Value `json:"depthRatio"`
-	RequiredQuoteVolume         fixedpoint.Value `json:"requiredQuoteVolume"`
+	DepthRatio          fixedpoint.Value `json:"depthRatio"`
+	RequiredQuoteVolume fixedpoint.Value `json:"requiredQuoteVolume"`
+	// Minimum 24h taker quote volume
 	RequiredTakerQuoteVolume24h fixedpoint.Value `json:"requiredTakerVolume24h"`
 
 	// Top N markets by market cap to consider
@@ -69,6 +67,9 @@ func (c *MarketSelectionConfig) Defaults() {
 	}
 	if c.RequiredQuoteVolume.IsZero() {
 		c.RequiredQuoteVolume = fixedpoint.NewFromFloat(100000)
+	}
+	if c.RequiredTakerQuoteVolume24h.IsZero() {
+		c.RequiredTakerQuoteVolume24h = fixedpoint.NewFromFloat(100000)
 	}
 	if c.TopNCap == 0 {
 		c.TopNCap = 10

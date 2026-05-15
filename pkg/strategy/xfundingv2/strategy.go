@@ -65,8 +65,6 @@ type Strategy struct {
 	MarketSelectionConfig *MarketSelectionConfig      `json:"marketSelection,omitempty"`
 	MaxPositionExposure   map[string]fixedpoint.Value `json:"maxPositionExposure"`
 
-	CheckInterval       time.Duration                                  `json:"checkInterval"`
-	ClosePositionOnExit bool                                           `json:"closePositionOnExit"`
 	CriticalErrorConfig CriticalErrorConfig                            `json:"criticalErrorConfig"`
 	CircuitBreakers     map[string]*circuitbreaker.BasicCircuitBreaker `json:"circuitBreakers"`
 
@@ -159,6 +157,17 @@ func (s *Strategy) Defaults() error {
 		s.MaxPendingRoundRetry = 3
 	}
 
+	if s.MaxClosedRetryCnt == 0 {
+		s.MaxClosedRetryCnt = 3
+	}
+
+	if s.CriticalErrorConfig.MaxRemainingNotional.IsZero() {
+		s.CriticalErrorConfig.MaxRemainingNotional = fixedpoint.NewFromInt(500)
+	}
+	if s.CriticalErrorConfig.MaxFundingRateFlip.IsZero() {
+		s.CriticalErrorConfig.MaxFundingRateFlip = fixedpoint.NewFromFloat(0.0003) // 0.03%
+	}
+
 	return nil
 }
 
@@ -185,7 +194,6 @@ func (s *Strategy) Initialize() error {
 	if s.MaxPositionExposure == nil {
 		s.MaxPositionExposure = make(map[string]fixedpoint.Value)
 	}
-	s.MaxClosedRetryCnt = 3
 	if s.CircuitBreakers == nil {
 		s.CircuitBreakers = make(map[string]*circuitbreaker.BasicCircuitBreaker)
 	}
@@ -1037,7 +1045,12 @@ func (s *Strategy) selectMostProfitableMarket(candidates []MarketCandidate) *Mar
 	if targetPosition.IsZero() {
 		return nil
 	}
-	if maxExposure, ok := s.MaxPositionExposure[bestCandidate.Symbol]; ok && targetPosition.Abs().Compare(maxExposure) > 0 {
+
+	bestMarket, ok := s.spotSession.Market(bestCandidate.Symbol)
+	if !ok {
+		return nil
+	}
+	if maxExposure, ok := s.MaxPositionExposure[bestMarket.BaseCurrency]; ok && targetPosition.Abs().Compare(maxExposure) > 0 {
 		if targetPosition.Sign() > 0 {
 			targetPosition = maxExposure
 		} else {
