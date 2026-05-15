@@ -252,74 +252,86 @@ func (r *ArbitrageRound) SetSlackAlert(alert slackalert.SlackAlert) {
 	r.slackAlert = alert
 }
 
-func (r *ArbitrageRound) SlackAttachment() slack.Attachment {
-	title := fmt.Sprintf("Arbitrage Round %s (%s)", r.SpotSymbol(), r.syncState.State)
+func (r *ArbitrageRound) NewNotification(isCritical bool) *roundNotification {
+	return &roundNotification{
+		ArbitrageRound: r,
+		IsCritical:     isCritical,
+	}
+}
+
+type roundNotification struct {
+	*ArbitrageRound
+	IsCritical bool
+}
+
+func (n *roundNotification) SlackAttachment() slack.Attachment {
+	title := fmt.Sprintf("Arbitrage Round %s (%s)", n.SpotSymbol(), n.syncState.State)
 	fields := []slack.AttachmentField{
 		{
 			Title: "Target Spot Position",
-			Value: r.syncState.TriggeredSpotTargetPosition.String(),
+			Value: n.syncState.TriggeredSpotTargetPosition.String(),
 			Short: true,
 		},
 		{
 			Title: "Funding Interval in Hours",
-			Value: fmt.Sprintf("%d", r.syncState.FundingIntervalHours),
+			Value: fmt.Sprintf("%d", n.syncState.FundingIntervalHours),
 			Short: true,
 		},
 		{
 			Title: "Triggered Funding Rate",
-			Value: r.syncState.TriggeredFundingRate.Percentage(),
+			Value: n.syncState.TriggeredFundingRate.Percentage(),
 			Short: true,
 		},
 		{
 			Title: "Annualized Funding Rate",
-			Value: r.AnnualizedRate().Percentage(),
+			Value: n.AnnualizedRate().Percentage(),
 			Short: true,
 		},
 	}
-	if r.State() == RoundClosing {
+	if n.State() == RoundClosing {
 		fields = append(fields,
 			slack.AttachmentField{
 				Title: "Closing Time",
-				Value: r.syncState.ClosingTime.Format(time.RFC3339),
+				Value: n.syncState.ClosingTime.Format(time.RFC3339),
 				Short: true,
 			},
 			slack.AttachmentField{
 				Title: "Expected Close Time",
-				Value: r.syncState.ClosingTime.Add(r.syncState.ClosingDuration).Format(time.RFC3339),
+				Value: n.syncState.ClosingTime.Add(n.syncState.ClosingDuration).Format(time.RFC3339),
 				Short: true,
 			})
-	} else if r.HasStarted() {
+	} else if n.HasStarted() {
 		fields = append(fields,
 			slack.AttachmentField{
 				Title: "Start Time",
-				Value: r.syncState.StartTime.Format(time.RFC3339),
+				Value: n.syncState.StartTime.Format(time.RFC3339),
 				Short: true,
 			},
 			slack.AttachmentField{
 				Title: "Min Holding Intervals",
-				Value: fmt.Sprintf("%d", r.syncState.MinHoldingIntervals),
+				Value: fmt.Sprintf("%d", n.syncState.MinHoldingIntervals),
 				Short: true,
 			})
 	}
 	fields = append(fields,
 		slack.AttachmentField{
 			Title: "Funding Interval Start",
-			Value: r.syncState.FundingIntervalStart.Format(time.RFC3339),
+			Value: n.syncState.FundingIntervalStart.Format(time.RFC3339),
 			Short: true,
 		},
 		slack.AttachmentField{
 			Title: "Funding Interval End",
-			Value: r.syncState.FundingIntervalEnd.Format(time.RFC3339),
+			Value: n.syncState.FundingIntervalEnd.Format(time.RFC3339),
 			Short: true,
 		})
 	text := "Arbitrage Round Details"
-	if len(r.slackAlert.Mentions) > 0 {
-		text += "cc " + strings.Join(r.slackAlert.Mentions, " ")
+	if n.IsCritical && len(n.slackAlert.Mentions) > 0 {
+		text += "cc " + strings.Join(n.slackAlert.Mentions, " ")
 	}
 	return slack.Attachment{
 		Title:  title,
 		Text:   text,
-		Color:  r.stateColor(),
+		Color:  n.stateColor(),
 		Fields: fields,
 	}
 }
