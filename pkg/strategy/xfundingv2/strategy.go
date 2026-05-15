@@ -16,6 +16,7 @@ import (
 	"github.com/c9s/bbgo/pkg/risk/circuitbreaker"
 	"github.com/c9s/bbgo/pkg/slack/slackalert"
 	"github.com/c9s/bbgo/pkg/types"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"github.com/slack-go/slack"
 	"golang.org/x/time/rate"
@@ -500,6 +501,16 @@ func (s *Strategy) CrossRun(
 		return fmt.Errorf("failed to connect spot stream books: %w", err)
 	}
 
+	// setup metrics for positions
+	for _, position := range s.spotPositions {
+		position.Strategy = s.ID()
+		position.StrategyInstanceID = s.InstanceID()
+	}
+	for _, position := range s.futuresPositions {
+		position.Strategy = s.ID()
+		position.StrategyInstanceID = s.InstanceID()
+	}
+
 	// setup callbacks
 	s.spotSession.MarketDataStream.OnKLineClosed(types.KLineWith(s.TickSymbol, s.TickInterval, func(kline types.KLine) {
 		s.tick(ctx, kline.EndTime.Time())
@@ -513,6 +524,20 @@ func (s *Strategy) CrossRun(
 		for _, round := range s.allRounds() {
 			if round.HasOrder(trade.OrderID) {
 				round.HandleSpotTrade(trade, trade.Time.Time())
+
+				spotFilledPosition := round.SpotWorker().FilledPosition()
+				filledRatio := spotFilledPosition.Div(round.TriggeredFundingRate()).Abs()
+				if round.State() == RoundClosing {
+					filledRatio = fixedpoint.One.Sub(filledRatio)
+				}
+				roundPositionFilledRatioMetrics.With(
+					prometheus.Labels{
+						"strategy_type": s.ID(),
+						"strategy_id":   s.InstanceID(),
+						"symbol":        round.SpotSymbol(),
+						"accountType":   "spot",
+					},
+				).Set(filledRatio.Float64())
 			}
 		}
 	})
@@ -523,6 +548,20 @@ func (s *Strategy) CrossRun(
 		for _, round := range s.allRounds() {
 			if round.HasOrder(trade.OrderID) {
 				round.HandleFuturesTrade(trade, trade.Time.Time())
+
+				futuresFilledPosition := round.FuturesWorker().FilledPosition()
+				filledRatio := futuresFilledPosition.Div(round.TriggeredFundingRate()).Abs()
+				if round.State() == RoundClosing {
+					filledRatio = fixedpoint.One.Sub(filledRatio)
+				}
+				roundPositionFilledRatioMetrics.With(
+					prometheus.Labels{
+						"strategy_type": s.ID(),
+						"strategy_id":   s.InstanceID(),
+						"symbol":        round.SpotSymbol(),
+						"accountType":   "futures",
+					},
+				).Set(filledRatio.Float64())
 			}
 		}
 	})
@@ -827,6 +866,13 @@ func (s *Strategy) checkOpenNewRound(ctx context.Context, currentTime time.Time)
 				},
 			)
 			round.SetSlackAlert(s.SlackAlert)
+			roundAnnualizedTriggerRateMetrics.With(
+				prometheus.Labels{
+					"strategy_type": s.ID(),
+					"strategy_id":   s.InstanceID(),
+					"symbol":        selectedCandidate.Symbol,
+				},
+			).Set(round.AnnualizedRate().Float64())
 			// save as pending round for the fee asset preparation
 			s.pendingRounds[selectedCandidate.Symbol] = &PendingRound{
 				Round: round,
@@ -1132,6 +1178,15 @@ func (s *Strategy) handleClosedRound(ctx context.Context, task *CloseRoundTask, 
 	} else {
 		s.logger.Warnf("circuit breaker not found for symbol %s when recording profit: %s", round.SpotSymbol(), pnl)
 	}
+	labels := prometheus.Labels{
+		"strategy_type": s.ID(),
+		"strategy_id":   s.InstanceID(),
+		"symbol":        round.SpotSymbol(),
+	}
+	roundHoldingIntervalMetrics.With(labels).Set(
+		float64(round.NumHoldingIntervals(tickTime)),
+	)
+	roundNetPnLMetrics.With(labels).Set(pnl.NetPnL().Float64())
 	// TODO: insert closed round records into database
 	return nil
 }
