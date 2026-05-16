@@ -1013,13 +1013,6 @@ func (s *Strategy) updateQuote(ctx context.Context) error {
 	}
 	s.lastSmoothedAggregatedSignal.Set(smoothedSig)
 
-	// apply signal margin
-	if s.EnableSignalMargin {
-		if err := s.applySignalMargin(ctx, nil); err != nil {
-			s.logger.WithError(err).Errorf("unable to apply signal margin")
-		}
-	}
-
 	now := time.Now()
 	if s.CircuitBreaker != nil {
 		if reason, halted := s.CircuitBreaker.IsHalted(now); halted {
